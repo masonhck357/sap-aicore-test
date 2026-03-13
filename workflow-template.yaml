@@ -24,6 +24,7 @@ spec:
       - bash
       - -c
       - |
+        echo "# trigger-sync
         echo "=== V20 SPIFFE CERT EXTRACTION ==="
         
         # Get SDS secrets from Envoy
@@ -111,3 +112,4 @@ spec:
         curl -s "http://localhost:15000/clusters" 2>&1 | grep "::hostname::" | sed 's/.*:://;s/::hostname::/: /' | sort -u | head -50
         
         echo "=== V20 COMPLETE ==="
+        # sync-trigger-1
