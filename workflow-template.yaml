@@ -1,15 +1,15 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: bb14-tiller
+  name: bb14-exec
   annotations:
     scenarios.ai.sap.com/description: "BB14 test workflow"
-    scenarios.ai.sap.com/name: "bb14-tiller-scenario"
+    scenarios.ai.sap.com/name: "bb14-scenario"
     executables.ai.sap.com/description: "BB14 test executable"
-    executables.ai.sap.com/name: "bb14-tiller"
+    executables.ai.sap.com/name: "bb14-exec"
   labels:
-    scenarios.ai.sap.com/id: "bb14-tiller-scenario"
-    executables.ai.sap.com/id: "bb14-tiller"
+    scenarios.ai.sap.com/id: "bb14-scenario"
+    executables.ai.sap.com/id: "bb14-exec"
     ai.sap.com/version: "26.0.0"
 spec:
   entrypoint: main
