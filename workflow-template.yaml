@@ -52,6 +52,7 @@ spec:
         done
 
         echo "[*] All Tiller IPs found: $TILLER_IPS"
+        export TILLER_IPS_FOUND="$TILLER_IPS"
 
         # -------------------------------------------------------
         # PHASE 2: Probe Tiller with multiple methods
@@ -182,31 +183,25 @@ spec:
           echo "[*] Attempting Python gRPC instead..."
 
           # Python approach - craft raw gRPC frames
-          python3 -c "
-import socket, struct, sys
-
-# gRPC frame: 1 byte compressed flag + 4 bytes message length + protobuf payload
-def make_grpc_frame(data=b''):
-    return struct.pack('>?I', False, len(data)) + data
-
-# HTTP/2 connection preface
-H2_PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
-
-# Try each Tiller IP
-for ip in '$TILLER_IPS'.split():
-    if not ip.strip(): continue
-    print(f'[*] Python gRPC probe: {ip}:44134')
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(5)
-        s.connect((ip, 44134))
-        s.send(H2_PREFACE)
-        resp = s.recv(4096)
-        print(f'[+] Response ({len(resp)} bytes): {resp[:100]}')
-        s.close()
-    except Exception as e:
-        print(f'[-] Error: {e}')
-" 2>&1
+          python3 << 'PYEOF'
+        import socket, struct, sys
+        import os
+        tiller_ips = os.environ.get('TILLER_IPS_FOUND', '').split()
+        H2_PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+        for ip in tiller_ips:
+            if not ip.strip(): continue
+            print(f'[*] Python gRPC probe: {ip}:44134')
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5)
+                s.connect((ip, 44134))
+                s.send(H2_PREFACE)
+                resp = s.recv(4096)
+                print(f'[+] Response ({len(resp)} bytes): {resp[:100]}')
+                s.close()
+            except Exception as e:
+                print(f'[-] Error: {e}')
+        PYEOF
         fi
 
         # -------------------------------------------------------
