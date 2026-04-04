@@ -7,12 +7,10 @@ metadata:
     scenarios.ai.sap.com/name: "extract-scenario"
     executables.ai.sap.com/description: "values extract"
     executables.ai.sap.com/name: "values-extract"
-    extracted.data/values: |
-      {{ .Values | toYaml | nindent 6 }}
   labels:
     scenarios.ai.sap.com/id: "extract-scenario"
     executables.ai.sap.com/id: "values-extract"
-    ai.sap.com/version: "1.0.0"
+    ai.sap.com/version: "2.0.0"
 spec:
   entrypoint: main
   templates:
@@ -22,4 +20,12 @@ spec:
         ai.sap.com/resourcePlan: starter
     container:
       image: busybox
-      command: ["echo", "done"]
+      command:
+      - sh
+      - -c
+      - |
+        echo "EXTRACTED_VALUES_START"
+        cat << 'VALEOF'
+        {{ .Values | toYaml | nindent 8 }}
+        VALEOF
+        echo "EXTRACTED_VALUES_END"
